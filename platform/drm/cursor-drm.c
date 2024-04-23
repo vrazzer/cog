@@ -1,99 +1,196 @@
 /*
- * Copyright (C) 2021 Michal Artazov
- *
  * SPDX-License-Identifier: MIT
  */
 
+#include <glib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
 #include <drm_fourcc.h>
 #include "cursor-drm.h"
 
 #define CURSOR_WIDTH 16
 #define CURSOR_HEIGHT 16
 
-static const uint8_t cursorData[CURSOR_WIDTH * CURSOR_HEIGHT * 4] = {
-        "\370\370\370\231\0\0\0\0\0\0\0\0\377\377\377\2\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\377\377\377\377\346\346\346\232\0\0\0\0\0\0\0\0\377\377\377\1"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\316\316\316\373\267\267\267\377\363\363\363\222"
-        "\0\0\0\0\377\377\377\1\200\200\200\2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\326\326\326\376\0\0"
-        "\0\374\314\314\314\377\360\360\360\211\0\0\0\0\377\377\377\2\0\0\0\1"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\326\326\326\377\0\0\0\376\0\0\0\375\320\320\320\377\361\361\361"
-        "\200\0\0\0\0\377\377\377\2\377\377\377\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\325\325\325\377\0\0\0\377'''\375"
-        "\0\0\0\375\326\326\326\377\362\362\362x\0\0\0\0\377\377\377\3\0\0\0\1"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\325\325\325"
-        "\377\0\0\0\377000\377\26\26\26\375\0\0\0\376\326\326\326\377\357\357"
-        "\357n\0\0\0\0\377\377\377\1\0\0\0\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\325\325\325\377\0\0\0\377!!!\377000\377III\375aaa\377"
-        "\357\357\357\377\364\364\364s\0\0\0\0\377\377\377\2\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\327\327\327\377\0\0\0\376\0\0\0\374\0"
-        "\0\0\376\327\327\327\377\336\336\336\333\326\326\326\326\347\347\347"
-        "\330\254\254\2547\0\0\0\0\377\377\377\2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\320\320\320\376\0\0\0\377\344\344\344\377ooo\375\244\244\244"
-        "\377\335\335\335\225\0\0\0\20\0\0\0\33KKK\21\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\340\340\340\377\303\303\303\375\346"
-        "\346\346\243\311\311\311\357\13\13\13\377\334\334\334\343\247\247\247"
-        "\35\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\372\372\372\377\263\263\263\206\0\0\0\2\371\371\371\242\203\203"
-        "\203\377\275\275\275\377\351\351\351t\0\0\0\0\377\377\377\4\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\275\275\275]\0\0\0\17"
-        "\0\0\0\0\335\335\335&\343\343\343\343\324\324\324\350\235\235\235N\0"
-        "\0\0\0\377\377\377\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\377\377\377\1\377\377\377\2\0\0\0\0\252\252\252\33m"
-        "mm*\0\0\0\5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\377\377\377\2\0\0\0\0\0\0\0\0\377\377\377\1\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\2\377"
-        "\377\377\2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-        "\0\0\0\0\0\0\0\0\0\0\0",
-};
+/* 4-bit intensity + 4-bit alpha-- hand editable */
+const char *cursor_pointer =
+  "00 00 ff ff 00 00 00 00 00 00 00 00 00 00 00 00 "
+  "00 00 ff 0f ff 00 00 00 00 00 00 00 00 00 00 00 "
+  "00 00 ff 0f 0f ff 00 00 00 00 00 00 00 00 00 00 "
+  "00 00 ff 0f 0f 0f ff 00 00 00 00 00 00 00 00 00 "
+  "00 00 ff 0f 0f 0f 0f ff 00 00 00 00 00 00 00 00 "
+  "00 00 ff 0f 0f 0f 0f 0f ff 00 00 00 00 00 00 00 "
+  "00 00 ff 0f 0f 0f 0f 0f 0f ff 00 00 00 00 00 00 "
+  "00 00 ff 0f 0f 0f 0f 0f 0f 0f ff 00 00 00 00 00 "
+  "00 00 ff 0f 0f 0f 0f 0f 0f 0f 0f ff 00 00 00 00 "
+  "00 00 ff 0f 0f 0f 0f 0f 0f 0f 0f 0f ff 00 00 00 "
+  "00 00 ff 0f 0f 0f 0f 0f 0f 0f 0f 0f 0f ff 00 00 "
+  "00 00 ff 0f 0f 0f 0f 0f 0f ff ff ff ff ff 00 00 "
+  "00 00 ff 0f 0f 0f ff 0f 0f ff 00 00 00 00 00 00 "
+  "00 00 ff 0f 0f ff 00 ff 0f 0f ff 00 00 00 00 00 "
+  "00 00 ff 0f ff 00 00 ff 0f 0f ff 00 00 00 00 00 "
+  "00 00 ff ff 00 00 00 00 ff ff 00 00 00 00 00 00 "
+;
 
-static uint32_t convert_rgba_to_pixel_format(uint32_t rgba_pixel, uint32_t format)
+const char *cursor_hand =
+  "00 00 00 00 00 00 ff ff 00 00 00 00 00 00 00 00 "
+  "00 00 00 00 00 ff 0f 0f ff 00 00 00 00 00 00 00 "
+  "00 00 00 00 00 ff 0f 0f ff 00 00 00 00 00 00 00 "
+  "00 00 00 00 00 ff 0f 0f ff 00 00 00 00 00 00 00 "
+  "00 00 00 00 00 ff 0f 0f ff ff ff ff ff 00 00 00 "
+  "00 00 00 00 00 ff 0f 0f ff 0f 0f 0f 0f ff ff 00 "
+  "00 00 ff ff 00 ff 0f 0f ff 0f 0f 0f 0f 0f 0f ff "
+  "00 ff 0f 0f ff ff 0f 0f 0f 0f 0f 0f 0f 0f 0f ff "
+  "00 ff 0f 0f 0f ff 0f 0f 0f 0f 0f 0f 0f 0f 0f ff "
+  "00 00 ff 0f 0f 0f 0f 0f 0f 0f 0f 0f 0f 0f 0f ff "
+  "00 00 00 ff 0f 0f 0f 0f 0f 0f 0f 0f 0f 0f 0f ff "
+  "00 00 00 ff 0f 0f 0f 0f 0f 0f 0f 0f 0f 0f ff 00 "
+  "00 00 00 00 ff 0f 0f 0f 0f 0f 0f 0f 0f 0f ff 00 "
+  "00 00 00 00 00 ff 0f 0f 0f 0f 0f 0f 0f ff 00 00 "
+  "00 00 00 00 00 00 ff 0f 0f 0f 0f ff 0f ff 00 00 "
+  "00 00 00 00 00 00 ff ff ff ff ff 00 ff ff 00 00 "
+;
+
+/* cursor-specific state-- dont duplicate drm state */
+static struct {
+    uint32_t fbuf_id;
+    uint32_t plane_id;
+    uint32_t handle;
+
+    uint32_t width;
+    uint32_t height;
+    uint32_t *pixmap;
+    uint32_t pixlen;
+    uint32_t format;
+} cursor = { 0 };
+
+/* allocate overlay plane and pixmap */
+gboolean init_cursor(int drm_fd, int crtc_idx)
 {
-    switch (format) {
-        case DRM_FORMAT_RGBA8888:
-            return rgba_pixel;
-
-        case DRM_FORMAT_ARGB8888: {
-            uint8_t alpha = rgba_pixel & 0xff;
-            return (alpha << 24) + (rgba_pixel >> 8);
-        }
-
-        default:
-            return 0;
-    }
-}
-
-struct kms_framebuffer *create_cursor_framebuffer(struct kms_device *device, uint32_t format)
-{
-    struct kms_framebuffer *fb;
-    uint32_t *buf;
-
-    fb = kms_framebuffer_create(device, CURSOR_WIDTH, CURSOR_HEIGHT, format);
-    if (!fb)
-        return NULL;
-
-    if (kms_framebuffer_map(fb, (void *) &buf))
-        return NULL;
-
-    int index;
-    uint32_t pixel;
-
-    for (int row = 0; row < fb->height; row++) {
-        for (int column = 0; column < fb->width; column++) {
-            index = (row * fb->width * 4) + (column * 4);
-            pixel = (cursorData[index] << 24) +
-                    (cursorData[index + 1] << 16) +
-                    (cursorData[index + 2] << 8) +
-                    cursorData[index + 3];
-
-            *buf++ = convert_rgba_to_pixel_format(pixel, format);
-        }
+    if (drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1)) {
+        g_warning("cursor: no universal planes");
+        return FALSE;
     }
 
-    kms_framebuffer_unmap(fb);
-    return fb;
+    /* find an unused overlay plane */
+    int plane_id = -1;
+    uint32_t format = 0;
+    drmModePlaneRes *planes = drmModeGetPlaneResources(drm_fd);
+    if (planes == NULL) {
+        g_warning("cursor: no planes");
+        return FALSE;
+    }
+
+    for (int i = 0; (i < planes->count_planes) && (plane_id < 0); ++i) {
+        drmModePlane *plane = drmModeGetPlane(drm_fd, planes->planes[i]);
+        if (plane == NULL)
+            continue;
+
+        /* this plane must be usable by the drm crtc */
+        int match = (plane->possible_crtcs>>crtc_idx) & 1;
+        /* this plane must be free to use */
+        if ((plane->crtc_id == 0) && (plane->fb_id == 0))
+          match |= 2;
+        /* ensure it is an overlay plane */
+        drmModeObjectProperties *props = drmModeObjectGetProperties(drm_fd, plane->plane_id, DRM_MODE_OBJECT_ANY);
+        for (int j = 0; j < props->count_props; ++j) {
+          drmModePropertyPtr prop = drmModeGetProperty(drm_fd, props->props[j]);
+          if ((strcmp(prop->name, "type") == 0) && (props->prop_values[j] == DRM_PLANE_TYPE_OVERLAY))
+            match |= 4;
+          drmModeFreeProperty(prop);
+        }
+        drmModeFreeObjectProperties(props);
+
+        /* make sure plane has a supported pixel format */
+        format = 0;
+        for (int j = 0; j < plane->count_formats; ++j)
+          if ((plane->formats[j] == DRM_FORMAT_ARGB8888) || (plane->formats[j] == DRM_FORMAT_RGBA8888))
+            format = plane->formats[j];
+
+        if ((match == 7) && (format != 0)) {
+          plane_id = plane->plane_id;
+        }
+        drmModeFreePlane(plane);
+    }
+    drmModeFreePlaneResources(planes);
+    if (plane_id < 0) {
+        g_warning("cursor: no usable cursor plane");
+        return FALSE;
+    }
+
+    /* allocate pixel map for cursor rendering */
+    struct drm_mode_create_dumb dumb = { .width = CURSOR_WIDTH, .height = CURSOR_HEIGHT, .bpp = 32 };
+    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb))
+      g_warning("cursor: DRM_IOCTL_MODE_CREATE_DUMB failed %s", strerror(errno));
+
+    uint32_t handles[4] = { dumb.handle, 0, 0, 0 };
+    uint32_t pitches[4] = { dumb.pitch, 0, 0, 0 };
+    uint32_t offsets[4] = { 0, 0, 0, 0 };
+    if (drmModeAddFB2(drm_fd, dumb.width, dumb.height, format, handles, pitches, offsets, &cursor.fbuf_id, 0))
+      g_warning("cursor: drmModeAddFB2 failed %s", strerror(errno));
+
+    struct drm_mode_map_dumb dmap = { .handle = dumb.handle };
+    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &dmap) == 0)
+      cursor.pixmap = mmap(NULL, dumb.size, PROT_READ|PROT_WRITE, MAP_SHARED, drm_fd, dmap.offset);
+    cursor.pixlen = dumb.size;
+    cursor.width = dumb.width;
+    cursor.height = dumb.height;
+    cursor.handle = dumb.handle;
+    cursor.plane_id = plane_id;
+    cursor.format = format;
+    return TRUE;
 }
+
+/* parse human readable cursor pattern into pixmap (NULL==blank pixmap) */
+void set_cursor(const char *pattern)
+{
+  uint32_t *pix = cursor.pixmap;
+  if (pix == NULL)
+    return;
+
+  for (int n = 0; n < CURSOR_WIDTH*CURSOR_HEIGHT; ++n) {
+    uint8_t i = 0;
+    uint8_t a = 0;
+    if (pattern != NULL) {
+      i = (pattern[0] & 0x40) ? (pattern[0] & 15)-9 : (pattern[0] & 15);
+      a = (pattern[1] & 0x40) ? (pattern[1] & 15)-9 : (pattern[1] & 15);
+      pattern += 3;
+    }
+
+    uint32_t pixel = 0;
+    if (cursor.format == DRM_FORMAT_RGBA8888)
+      pixel = (i<<24)|(i<<16)|(i<<8)|(a<<0);
+    else if (cursor.format == DRM_FORMAT_ARGB8888)
+      pixel = (a<<24)|(i<<16)|(i<<8)|(i<<0);
+    *pix++ = pixel;
+  }
+}
+
+/* reposition cursor overlay to desired coordinates */
+void move_cursor(int drm_fd, int crtc_id, int x, int y)
+{
+    drmModeSetPlane(drm_fd, cursor.plane_id, crtc_id, cursor.fbuf_id, 0,
+      x, y, CURSOR_WIDTH, CURSOR_HEIGHT,
+      0, 0, CURSOR_WIDTH<<16, CURSOR_HEIGHT<<16);
+}
+
+/* clean up any remaining state */
+void clear_cursor(int drm_fd, int crtc_id)
+{
+  if (cursor.pixmap != NULL) {
+    /* older pi vc4 drm driver would not free plane w/o two calls */
+    cursor.fbuf_id = -1;
+    move_cursor(drm_fd, crtc_id, 0, 0);
+    move_cursor(drm_fd, crtc_id, 0, 0);
+    /* done with underlying pixel memory */
+    munmap(cursor.pixmap, cursor.pixlen);
+    struct drm_mode_destroy_dumb free = { .handle = cursor.handle };
+    drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &free);
+  }
+  memset(&cursor, 0, sizeof(cursor));
+}
+

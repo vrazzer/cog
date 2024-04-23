@@ -3,7 +3,6 @@ drm_platform_plugin = shared_module('cogplatform-drm',
     'cog-drm-renderer.c',
     'cog-drm-gles-renderer.c',
     'cog-drm-modeset-renderer.c',
-    'kms.c',
     'cursor-drm.c',
     c_args: ['-DG_LOG_DOMAIN="Cog-DRM"'],
     dependencies: [

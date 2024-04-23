@@ -10,9 +10,7 @@
 
 #include "cog-drm-renderer.h"
 #include "cursor-drm.h"
-#include "kms.h"
 #include <assert.h>
-#include <drm_fourcc.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <gbm.h>
@@ -580,76 +578,6 @@ init_drm(void)
     return TRUE;
 }
 
-static const uint32_t formats[] = {
-    DRM_FORMAT_RGBA8888,
-    DRM_FORMAT_ARGB8888,
-};
-
-static uint32_t
-choose_format (struct kms_plane *plane)
-{
-    for (int i = 0; i < G_N_ELEMENTS(formats); i++) {
-        if (kms_plane_supports_format(plane, formats[i]))
-            return formats[i];
-    }
-
-    return 0;
-}
-
-static void
-clear_cursor (void) {
-    g_clear_pointer(&cursor.cursor, kms_framebuffer_free);
-    g_clear_pointer(&cursor.device, kms_device_free);
-    cursor.plane = NULL;
-}
-
-static gboolean
-init_cursor (void)
-{
-    bool cursor_supported = drmSetClientCap(drm_data.fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) == 0;
-    if (!cursor_supported) {
-        g_warning("cursor not supported");
-        return FALSE;
-    }
-
-    cursor.device = kms_device_open(drm_data.fd);
-    if (!cursor.device)
-        return FALSE;
-
-    cursor.plane = kms_device_find_plane_by_type(cursor.device, DRM_PLANE_TYPE_CURSOR, 0);
-    if (!cursor.plane) {
-        g_clear_pointer(&cursor.device, kms_device_free);
-        return FALSE;
-    }
-
-    uint32_t format = choose_format(cursor.plane);
-    if (!format) {
-        g_clear_pointer(&cursor.device, kms_device_free);
-        return FALSE;
-    }
-
-    cursor.cursor = create_cursor_framebuffer(cursor.device, format);
-    if (!cursor.cursor) {
-        g_clear_pointer(&cursor.device, kms_device_free);
-        return FALSE;
-    }
-
-    cursor.x = (cursor.device->screens[0]->width - cursor.cursor->width) / 2;
-    cursor.y = (cursor.device->screens[0]->height - cursor.cursor->height) / 2;
-    cursor.screen_width = cursor.device->screens[0]->width;
-    cursor.screen_height = cursor.device->screens[0]->height;
-
-    if (kms_plane_set(cursor.plane, cursor.cursor, cursor.x, cursor.y)) {
-        g_clear_pointer(&cursor.device, kms_device_free);
-        g_clear_pointer(&cursor.cursor, kms_framebuffer_free);
-        return FALSE;
-    }
-
-    cursor.enabled = TRUE;
-
-    return TRUE;
-}
-
 static void
 clear_gbm (void)
 {
@@ -884,7 +812,7 @@ input_handle_pointer_motion_event(struct libinput_event_pointer *pointer_event, 
     };
 
     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
-    kms_plane_set(cursor.plane, cursor.cursor, cursor.x, cursor.y);
+    move_cursor(drm_data.fd, drm_data.crtc.obj_id, cursor.x, cursor.y);
 }
 
 static void
@@ -1413,7 +1341,12 @@ cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *param
     }
 
     if (g_getenv ("COG_PLATFORM_DRM_CURSOR")) {
-        if (!init_cursor ()) {
+        if (init_cursor(drm_data.fd, drm_data.crtc.index)) {
+            cursor.enabled = true;
+            cursor.x = drm_data.width/2;
+            cursor.y = drm_data.height/2;
+            set_cursor(cursor_pointer);
+        } else {
             g_warning ("Failed to initialize cursor");
         }
     }
@@ -1500,7 +1433,7 @@ cog_drm_platform_finalize(GObject *object)
     clear_input(self);
     clear_egl();
     clear_gbm();
-    clear_cursor();
+    clear_cursor(drm_data.fd, drm_data.crtc.obj_id);
     clear_drm();
 
     G_OBJECT_CLASS(cog_drm_platform_parent_class)->finalize(object);
