@@ -10,6 +10,7 @@
 
 #include "cog-drm-renderer.h"
 #include "cursor-drm.h"
+#include "../common/cog-cursors.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1352,7 +1353,7 @@ cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *param
             cursor.enabled = true;
             cursor.x = drm_data.width/2;
             cursor.y = drm_data.height/2;
-            set_cursor(cursor_pointer);
+            set_cursor("default");
         } else {
             g_warning ("Failed to initialize cursor");
         }
@@ -1475,6 +1476,22 @@ set_target_refresh_rate(gpointer user_data)
 }
 
 static void
+on_mouse_target_changed(WebKitWebView *view, WebKitHitTestResult *hitTestResult, guint mouseModifiers)
+{
+    CogCursorNames cursor_names = cog_cursors_get_names_for_hit_test(hitTestResult);
+
+    /* pass list of names to set_cursor-- stop at success */
+    int set = 0;
+    for (int i = 0; !set && cursor_names[i]; ++i) {
+      set = !set_cursor(cursor_names[i]);
+    }
+
+    /* if no names matched, force back to pointer */
+    if (!set)
+      set_cursor("pointer");
+}
+
+static void
 cog_drm_platform_init_web_view(CogPlatform *platform, WebKitWebView *view)
 {
     COG_DRM_PLATFORM(platform)->web_view = COG_VIEW(view);
@@ -1482,6 +1499,8 @@ cog_drm_platform_init_web_view(CogPlatform *platform, WebKitWebView *view)
     wpe_view_backend_dispatch_set_device_scale_factor(wpe_view_data.backend, drm_data.device_scale);
 
     g_idle_add(G_SOURCE_FUNC(set_target_refresh_rate), &wpe_view_data);
+
+    g_signal_connect(view, "mouse-target-changed", G_CALLBACK(on_mouse_target_changed), NULL);
 }
 
 static void
