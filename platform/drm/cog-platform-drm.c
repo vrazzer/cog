@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <gbm.h>
 #include <libinput.h>
+#include <linux/input.h>
 #include <libudev.h>
 #include <string.h>
 #include <wayland-server.h>
@@ -831,6 +832,12 @@ input_handle_pointer_button_event (struct libinput_event_pointer *pointer_event)
         .modifiers = 0,
     };
 
+    /* raw codes are 0x0000-0x03ff: dispatch_pointer_event expects BTN_LEFT=1, BTN_RIGHT=2, etc */
+    if (event.button >= BTN_MOUSE)
+        event.button -= (BTN_MOUSE-1);
+
+    /* note that BTN_RIGHT can trigger weirdness likely because drm has no default context menu */
+    /* javascript can listen for 'context' (and call preventDefault) to draw a custom menu */
     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
 }
 
