@@ -45,7 +45,7 @@ typedef EGLDisplay (EGLAPIENTRYP PFNEGLGETPLATFORMDISPLAYEXTPROC) (EGLenum platf
 #endif
 
 #define KEY_STARTUP_DELAY 500000
-#define KEY_REPEAT_DELAY 100000
+#define KEY_REPEAT_DELAY  100000
 
 #ifndef g_debug_once
 #    define g_debug_once(...)                                                                     \
@@ -191,7 +191,7 @@ static struct {
     uint32_t input_width;
     uint32_t input_height;
 
-    struct keyboard_event repeating_key;
+    struct wpe_input_keyboard_event key_repeat_event;
 
     struct wpe_input_touch_event_raw touch_points[10];
     enum wpe_input_touch_event_type last_touch_type;
@@ -201,7 +201,7 @@ static struct {
     .libinput = NULL,
     .input_width = 0,
     .input_height = 0,
-    .repeating_key = {0, 0},
+    .key_repeat_event = { 0 },
     .last_touch_type = wpe_input_touch_event_type_null,
     .last_touch_id = 0,
 };
@@ -631,7 +631,7 @@ init_egl (void)
 }
 
 static void
-input_dispatch_key_event(CogView *view, uint32_t time, uint32_t key, enum libinput_key_state state)
+input_handle_key_event(CogView *view, struct libinput_event_keyboard *key_event)
 {
     struct wpe_input_xkb_context *default_context = wpe_input_xkb_context_get_default ();
 
@@ -653,8 +653,12 @@ input_dispatch_key_event(CogView *view, uint32_t time, uint32_t key, enum libinp
     if (!context_state)
         return;
 
+    // Explanation for the offset-by-8, copied from Weston:
+    //   evdev XKB rules reflect X's  broken keycode system, which starts at 8
+    uint32_t key = libinput_event_keyboard_get_key (key_event) + 8;
+    enum libinput_key_state state = libinput_event_keyboard_get_key_state (key_event);
+    uint32_t time = libinput_event_keyboard_get_time (key_event);
     uint32_t keysym = wpe_input_xkb_context_get_key_code (default_context, key, !!state);
-
     xkb_state_update_key (context_state, key, !!state ? XKB_KEY_DOWN : XKB_KEY_UP);
     uint32_t modifiers = wpe_input_xkb_context_get_modifiers (default_context,
         xkb_state_serialize_mods (context_state, XKB_STATE_MODS_DEPRESSED),
@@ -669,47 +673,15 @@ input_dispatch_key_event(CogView *view, uint32_t time, uint32_t key, enum libinp
             .pressed = (!!state),
             .modifiers = modifiers,
     };
-
     cog_view_handle_key_event(view, &event);
-}
 
-static void
-start_repeating_key (uint32_t time, uint32_t key)
-{
-    if (!!input_data.repeating_key.time && input_data.repeating_key.time == time
-        && input_data.repeating_key.key == key) {
-        return;
-    }
-
-    input_data.repeating_key = (keyboard_event) {time, key};
-    g_source_set_ready_time (glib_data.key_repeat_source,
-                             g_get_monotonic_time() + KEY_STARTUP_DELAY);
-}
-
-static void
-stop_repeating_key (void)
-{
-    if (!!input_data.repeating_key.time) {
-        g_source_set_ready_time (glib_data.key_repeat_source, -1);
-    }
-    input_data.repeating_key = (keyboard_event) {0, 0};
-}
-
-static void
-input_handle_key_event(CogView *view, struct libinput_event_keyboard *key_event)
-{
-    // Explanation for the offset-by-8, copied from Weston:
-    //   evdev XKB rules reflect X's  broken keycode system, which starts at 8
-    uint32_t key = libinput_event_keyboard_get_key (key_event) + 8;
-    uint32_t time = libinput_event_keyboard_get_time (key_event);
-    enum libinput_key_state key_state = libinput_event_keyboard_get_key_state (key_event);
-
-    input_dispatch_key_event(view, time, key, key_state);
-
-    if (!!key_state) {
-        start_repeating_key (time, key);
-    } else {
-        stop_repeating_key ();
+    g_warning("input_handle_key_event: state=%d\n", state);
+    if (!state) {
+        input_data.key_repeat_event.time = 0;
+        g_source_set_ready_time(glib_data.key_repeat_source, -1);
+    } else if (!!memcmp(&input_data.key_repeat_event, &event, sizeof(event))) {
+        memcpy(&input_data.key_repeat_event, &event, sizeof(event));
+        g_source_set_ready_time(glib_data.key_repeat_source, g_get_monotonic_time()+KEY_STARTUP_DELAY);
     }
 }
 
@@ -1231,15 +1203,14 @@ input_source_dispatch (GSource *base, GSourceFunc callback, gpointer user_data)
 static gboolean
 key_repeat_source_dispatch(CogDrmPlatform *platform)
 {
-    if (!input_data.repeating_key.time) {
+    if (!input_data.key_repeat_event.time) {
+        g_warning("key_repeat_source_dispatch: cancel");
         g_source_set_ready_time(glib_data.key_repeat_source, -1);
-        return G_SOURCE_CONTINUE;
+    } else {
+        g_warning("key_repeat_source_dispatch: send");
+        //g_source_set_ready_time(glib_data.key_repeat_source, g_get_monotonic_time()+KEY_REPEAT_DELAY);
+        cog_view_handle_key_event(platform->web_view, &input_data.key_repeat_event);
     }
-
-    input_dispatch_key_event(platform->web_view,
-                             input_data.repeating_key.time,
-                             input_data.repeating_key.key,
-                             LIBINPUT_KEY_STATE_PRESSED);
     return G_SOURCE_CONTINUE;
 }
 
