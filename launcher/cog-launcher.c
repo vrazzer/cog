@@ -1320,11 +1320,17 @@ cog_launcher_handle_local_options(GApplication *application, GVariantDict *optio
     CogLauncher *launcher = COG_LAUNCHER(application);
 
     if (s_options.version) {
-        g_print("%s (WPE WebKit %u.%u.%u)\n",
+        g_print("%s (WPE WebKit %u.%u.%u) (LibWPE %u.%u.%u) (GLib %u.%u.%u)\n",
                 COG_VERSION_STRING COG_VERSION_EXTRA,
                 webkit_get_major_version(),
                 webkit_get_minor_version(),
-                webkit_get_micro_version());
+                webkit_get_micro_version(),
+                wpe_get_major_version(),
+                wpe_get_minor_version(),
+                wpe_get_micro_version(),
+                GLIB_MAJOR_VERSION,
+                GLIB_MINOR_VERSION,
+                GLIB_MICRO_VERSION);
         return EXIT_SUCCESS;
     }
     if (s_options.print_appid) {
