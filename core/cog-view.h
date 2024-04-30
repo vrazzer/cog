@@ -47,10 +47,22 @@ COG_API
 void cog_view_handle_key_event(CogView *self, const struct wpe_input_keyboard_event *event);
 
 COG_API
+int32_t cog_view_remap_parm(const char *skey, int32_t def);
+
+COG_API
+gboolean cog_view_remap_event(struct wpe_input_keyboard_event *event);
+
+COG_API
+gboolean cog_view_remap_import(const char *url);
+
+COG_API
 void cog_view_set_use_key_bindings(CogView *self, gboolean enable);
 
 COG_API
 gboolean cog_view_get_use_key_bindings(CogView *self);
+
+COG_API
+gboolean cog_view_try_handle_key_binding(CogView *self, const struct wpe_input_keyboard_event *event);
 
 COG_API
 CogViewport *cog_view_get_viewport(CogView *self);

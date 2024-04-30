@@ -51,6 +51,18 @@ static GParamSpec *s_properties[N_PROPERTIES] = {
 G_DECLARE_DERIVABLE_TYPE(CogCoreView, cog_core_view, COG, CORE_VIEW, CogView)
 G_DEFINE_TYPE(CogCoreView, cog_core_view, COG_TYPE_VIEW)
 
+static struct {
+    uint32_t fr_key;
+    uint32_t fr_mod;
+    uint32_t to_key;
+    uint32_t to_mod;
+} g_keymap[1024] = { 0 };
+
+static struct {
+    uint32_t key;
+    int32_t val;
+} g_custom[256] = { 0 };
+
 static GObject *
 cog_view_constructor(GType type, unsigned n_properties, GObjectConstructParam *properties)
 {
@@ -257,7 +269,7 @@ cog_core_view_init(CogCoreView *self)
 {
 }
 
-static gboolean
+gboolean
 cog_view_try_handle_key_binding(CogView *self, const struct wpe_input_keyboard_event *event)
 {
     static const float DEFAULT_ZOOM_STEP = 0.1f;
@@ -327,6 +339,18 @@ cog_view_try_handle_key_binding(CogView *self, const struct wpe_input_keyboard_e
         return TRUE;
     }
 
+    /* Virtual WPE_KEY_HomePage: pop all history until first webpage (home) */
+    if (event->key_code == WPE_KEY_HomePage) {
+        g_warning("pop goes the history\n");
+        WebKitBackForwardList *list = webkit_web_view_get_back_forward_list(WEBKIT_WEB_VIEW(self));
+        WebKitBackForwardListItem *item = NULL;
+        for (int i = 0; webkit_back_forward_list_get_nth_item(list, i-1) != NULL; --i)
+            item = webkit_back_forward_list_get_nth_item(list, i-1);
+        if (item != NULL)
+            webkit_web_view_go_to_back_forward_list_item(WEBKIT_WEB_VIEW(self), item);
+        return TRUE;
+    }
+
     return FALSE;
 }
 
@@ -351,12 +375,117 @@ cog_view_handle_key_event(CogView *self, const struct wpe_input_keyboard_event *
     g_return_if_fail(event);
 
     CogViewPrivate *priv = cog_view_get_instance_private(self);
-
     if (priv->use_key_bindings && cog_view_try_handle_key_binding(self, event))
         return;
 
     struct wpe_input_keyboard_event event_copy = *event;
     wpe_view_backend_dispatch_keyboard_event(cog_view_get_backend_internal(self), &event_copy);
+}
+
+gboolean
+cog_view_remap_event(struct wpe_input_keyboard_event *event)
+{
+    uint32_t key = event->key_code;
+    uint32_t mod = event->modifiers;
+    for (int i = 0; (i < sizeof(g_keymap)/sizeof(g_keymap[0])) && !!g_keymap[i].fr_key; ++i) {
+        if ((key == g_keymap[i].fr_key) && (mod == g_keymap[i].fr_mod)) {
+            event->key_code = g_keymap[i].to_key;
+            event->modifiers = g_keymap[i].to_mod;
+            if (event->key_code == WPE_KEY_VoidSymbol)
+                event->time = 0;
+            g_warning("remap-fr: %d(%02x):%d(%02x)", key, key, mod, mod);
+            g_warning("remap-to: %d(%02x):%d(%02x)", event->key_code, event->key_code, event->modifiers, event->modifiers);
+            break;
+        }
+    }
+    return((event->key_code != key) || (event->modifiers != mod));
+}
+
+int32_t
+cog_view_remap_parm(const char *skey, int32_t def)
+{
+    uint32_t key = 0;
+    for (; (*skey >= 'a') && (*skey <= 'z'); ++skey)
+        if (key < 0x01000000)
+            key = (key<<8) | *skey;
+
+    for (int i = 0; (i < sizeof(g_custom)/sizeof(g_custom[0])) && !!g_custom[i].key; ++i) {
+        if (g_custom[i].key == key)
+            return(g_custom[i].val);
+    }
+    return(def);
+}
+
+/* install event remaps and custom parms for this page */
+gboolean
+cog_view_remap_import(const char *uri)
+{
+    /* clear keymap and custom parms */
+    memset(&g_keymap[0], 0, sizeof(g_keymap[0]));
+    memset(&g_custom[0], 0, sizeof(g_custom[0]));
+
+    /* use COG_URL_KEYMAP to determine specific mapping for this url */
+    const gchar *cmp = g_getenv("COG_KEYMAP_URL");
+    if (cmp == NULL)
+        return(0);
+    g_warning("on_load_changed: cmp=%s uri=(%s)", cmp, uri);
+
+    int env = -1;
+    gchar **seg = g_strsplit(cmp, ",", 256);
+    if (seg == NULL)
+        return(0);
+    for (int i = 0; seg[i] != NULL; ++i) {
+        if (seg[i][0] == '#')
+            env = i;
+        else if (g_strstr_len(uri, -1, seg[i]) != NULL)
+            break;
+    }
+
+    if (env >= 0) {
+        g_warning("keymapping via %s", seg[env]);
+        const gchar *map = g_getenv(seg[env]+1);
+        if (map == NULL)
+            g_warning("COG_URL_KEYMAP referenced missing env(%s)", seg[env]+1);
+
+        /* key=val[comment], ... where key/val are dec or hex */
+        int ki = 0, ci = 0;
+        for (const gchar *s = map; (s != NULL) && (*s != 0);) {
+            while ((*s > 0) && (*s <= ' '))
+                ++s;
+            if (*s == '$') {
+                /* handle custom parms: $key=val */
+                g_custom[ci].key = 0;
+                for (++s; (*s >= 'a') && (*s <= 'z'); ++s) {
+                    if (g_custom[ci].key < 0x01000000)
+                        g_custom[ci].key = (g_custom[ci].key<<8) | *s;
+                }
+                if (*s != '=')
+                    break;
+                g_custom[ci].val = g_ascii_strtoll(s+1, (gchar **)&s, 0);
+                if (ci+1 < sizeof(g_custom)/sizeof(g_custom[0]))
+                    ++ci;
+            } else {
+                /* handle remap: key:mod=new-key:new-mod */
+                g_keymap[ki].fr_key = g_ascii_strtoll(s, (gchar **)&s, 0);
+                g_keymap[ki].fr_mod = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
+                if (*s != '=')
+                    break;
+                g_keymap[ki].to_key = g_ascii_strtoll(s+1, (gchar **)&s, 0);
+                g_keymap[ki].to_mod = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
+                if (ki+1 < sizeof(g_keymap)/sizeof(g_keymap[0]))
+                    ++ki;
+            }
+            /* gobble chars after key=val until comma to allow for comments */
+            while ((*s > 0) && (*s != ','))
+                ++s;
+            if (*s == ',')
+                ++s;
+        }
+        g_keymap[ki].fr_key = g_keymap[ki].fr_mod = 0;
+        g_custom[ci].key = 0;
+    }
+    g_strfreev(seg);
+    return(0);
 }
 
 /**
