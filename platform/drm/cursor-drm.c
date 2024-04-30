@@ -83,14 +83,43 @@ static struct {
 
     uint32_t width;
     uint32_t height;
-    uint32_t *pixmap;
+    uint32_t pitch;
+    uint8_t *pixmap;
     uint32_t pixlen;
-    uint32_t format;
+    int depth;
+    int shift;
 
     int px;
     int py;
     const char *pattern;
 } cursor = { 0 };
+
+/* supported pixel-formats (alpha required) */
+const static struct {
+    uint32_t fourcc;
+    int depth; /* color depth */
+    int shift; /* <0=alpha shift, >0=color shift */
+} layout[] = {
+    /* ordered highest to lowest priority */
+    { DRM_FORMAT_ABGR1555, 5, -15 },
+
+
+    { DRM_FORMAT_ARGB8888, 8, -24 },
+    { DRM_FORMAT_ABGR8888, 8, -24 },
+    { DRM_FORMAT_RGBA8888, 8,  24 },
+    { DRM_FORMAT_BGRA8888, 8,  24 },
+
+    { DRM_FORMAT_ARGB4444, 4, -12 },
+    { DRM_FORMAT_ABGR4444, 4, -12 },
+    { DRM_FORMAT_RGBA4444, 4,  12 },
+    { DRM_FORMAT_BGRA4444, 4,  12 },
+
+    { DRM_FORMAT_ARGB1555, 5, -15 },
+    { DRM_FORMAT_ABGR1555, 5, -15 },
+    { DRM_FORMAT_RGBA5551, 5,  15 },
+    { DRM_FORMAT_BGRA5551, 5,  15 },
+    { 0, 0, 0 }
+};
 
 /* allocate overlay plane and pixmap */
 gboolean init_cursor(int drm_fd, int crtc_idx)
@@ -102,43 +131,46 @@ gboolean init_cursor(int drm_fd, int crtc_idx)
 
     /* find an unused overlay plane */
     int plane_id = -1;
-    uint32_t format = 0;
+    int format = -1;
     drmModePlaneRes *planes = drmModeGetPlaneResources(drm_fd);
     if (planes == NULL) {
         g_warning("cursor: no planes");
         return FALSE;
     }
 
-    for (int i = 0; (i < planes->count_planes) && (plane_id < 0); ++i) {
-        drmModePlane *plane = drmModeGetPlane(drm_fd, planes->planes[i]);
-        if (plane == NULL)
-            continue;
+    /* search for planes by best to worst pixel format */
+    for (int f = 0; (format < 0) && !!layout[f].fourcc; ++f) {
+        for (int i = 0; (i < planes->count_planes) && (plane_id < 0); ++i) {
+            drmModePlane *plane = drmModeGetPlane(drm_fd, planes->planes[i]);
+            if (plane == NULL)
+                continue;
 
-        /* this plane must be usable by the drm crtc */
-        int match = (plane->possible_crtcs>>crtc_idx) & 1;
-        /* this plane must be free to use */
-        if ((plane->crtc_id == 0) && (plane->fb_id == 0))
-            match |= 2;
-        /* ensure it is an overlay plane */
-        drmModeObjectProperties *props = drmModeObjectGetProperties(drm_fd, plane->plane_id, DRM_MODE_OBJECT_ANY);
-        for (int j = 0; j < props->count_props; ++j) {
-            drmModePropertyPtr prop = drmModeGetProperty(drm_fd, props->props[j]);
-            if ((strcmp(prop->name, "type") == 0) && (props->prop_values[j] == DRM_PLANE_TYPE_OVERLAY))
-                match |= 4;
-            drmModeFreeProperty(prop);
+            /* plane must be usable by the drm crtc */
+            int match = (plane->possible_crtcs>>crtc_idx) & 1;
+            /* plane must be available for use */
+            if ((plane->crtc_id == 0) && (plane->fb_id == 0))
+                match |= 2;
+            /* ensure it is an overlay plane */
+            drmModeObjectProperties *props =
+                drmModeObjectGetProperties(drm_fd, plane->plane_id, DRM_MODE_OBJECT_ANY);
+            for (int j = 0; j < props->count_props; ++j) {
+                drmModePropertyPtr prop = drmModeGetProperty(drm_fd, props->props[j]);
+                if (!strcmp(prop->name, "type") && (props->prop_values[j] == DRM_PLANE_TYPE_OVERLAY))
+                    match |= 4;
+                drmModeFreeProperty(prop);
+            }
+            drmModeFreeObjectProperties(props);
+            /* verify pixel format supported */
+            for (int j = 0; j < plane->count_formats; ++j)
+                if (plane->formats[j] == layout[f].fourcc)
+                  match |= 8;
+
+            if (match == 15) {
+                plane_id = plane->plane_id;
+                format = f;
+            }
+            drmModeFreePlane(plane);
         }
-        drmModeFreeObjectProperties(props);
-
-        /* make sure plane has a supported pixel format */
-        format = 0;
-        for (int j = 0; j < plane->count_formats; ++j)
-            if ((plane->formats[j] == DRM_FORMAT_ARGB8888) || (plane->formats[j] == DRM_FORMAT_RGBA8888))
-              format = plane->formats[j];
-
-        if ((match == 7) && (format != 0)) {
-            plane_id = plane->plane_id;
-        }
-        drmModeFreePlane(plane);
     }
     drmModeFreePlaneResources(planes);
     if (plane_id < 0) {
@@ -146,15 +178,17 @@ gboolean init_cursor(int drm_fd, int crtc_idx)
         return FALSE;
     }
 
-    /* allocate pixel map for cursor rendering */
-    struct drm_mode_create_dumb dumb = { .width = CURSOR_WIDTH, .height = CURSOR_HEIGHT, .bpp = 32 };
+    /* allocate pixel map for cursor rendering (always use 32-bit max-pixel size) */
+    struct drm_mode_create_dumb dumb =
+        { .width = CURSOR_WIDTH, .height = CURSOR_HEIGHT, .bpp = 32 };
     if (drmIoctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb))
         g_warning("cursor: DRM_IOCTL_MODE_CREATE_DUMB failed %s", strerror(errno));
 
     uint32_t handles[4] = { dumb.handle, 0, 0, 0 };
     uint32_t pitches[4] = { dumb.pitch, 0, 0, 0 };
     uint32_t offsets[4] = { 0, 0, 0, 0 };
-    if (drmModeAddFB2(drm_fd, dumb.width, dumb.height, format, handles, pitches, offsets, &cursor.fbuf_id, 0))
+    if (drmModeAddFB2(drm_fd, dumb.width, dumb.height, layout[format].fourcc,
+            handles, pitches, offsets, &cursor.fbuf_id, 0))
         g_warning("cursor: drmModeAddFB2 failed %s", strerror(errno));
 
     struct drm_mode_map_dumb dmap = { .handle = dumb.handle };
@@ -162,18 +196,24 @@ gboolean init_cursor(int drm_fd, int crtc_idx)
         cursor.pixmap = mmap(NULL, dumb.size, PROT_READ|PROT_WRITE, MAP_SHARED, drm_fd, dmap.offset);
     cursor.pixlen = dumb.size;
     cursor.width = dumb.width;
+    cursor.pitch = dumb.pitch;
     cursor.height = dumb.height;
     cursor.handle = dumb.handle;
+    cursor.depth = layout[format].depth;
+    cursor.shift = layout[format].shift;
     cursor.plane_id = plane_id;
-    cursor.format = format;
+
+    format = layout[format].fourcc;
+    g_debug("init_cursor: width=%d height=%d pitch=%d shift=%d fourcc=%c%c%c%c",
+            cursor.width, cursor.height, cursor.pitch, cursor.shift,
+            (format>>0)&255, (format>>8)&255, (format>>16)&255, (format>>24)&255);
     return TRUE;
 }
 
 /* parse human readable cursor pattern into pixmap (NULL==blank pixmap) */
 int set_cursor(const char *pattern)
 {
-    uint32_t *pix = cursor.pixmap;
-    if ((pix == NULL) || (pattern == NULL))
+    if ((cursor.pixmap == NULL) || (pattern == NULL))
         return(-1);
 
     if (strlen(pattern) < cursor.width*cursor.height*3) {
@@ -191,7 +231,6 @@ int set_cursor(const char *pattern)
             return(-2);
     }
 
-
     /* remember last pattern since can get spammed */
     if (pattern == cursor.pattern)
       return(0);
@@ -199,27 +238,42 @@ int set_cursor(const char *pattern)
 
     /* parse cursor pattern and save offset to focus pixel */
     cursor.px = cursor.py = 0;
-    for (int n = 0; n < cursor.width*cursor.height; ++n) {
-        uint8_t i = 0;
-        uint8_t a = 0;
-        if ((pattern[0] != 0) && (pattern[1] != 0)) {
-            i = (pattern[0] & 0x40) ? (pattern[0] & 15)-9 : (pattern[0] & 15);
-            a = (pattern[1] & 0x40) ? (pattern[1] & 15)-9 : (pattern[1] & 15);
-            pattern += 2;
-            if (pattern[0] == '+') {
-                cursor.px = n%cursor.width;
-                cursor.py = n/cursor.width;
+    for (int y = 0; y < cursor.height; ++y) {
+        uint8_t *pix = cursor.pixmap + y*cursor.pitch;
+        for (int x = 0; x < cursor.width; ++x) {
+            uint32_t c = 0;
+            uint32_t a = 0;
+            if ((pattern[0] != 0) && (pattern[1] != 0)) {
+                c = (pattern[0]&15) + ((pattern[0] & 0x40) ? 9 : 0);
+                a = (pattern[1]&15) + ((pattern[1] & 0x40) ? 9 : 0);
+                pattern += 2;
+                if (pattern[0] == '+') {
+                    cursor.px = x;
+                    cursor.py = y;
+                }
+                if (pattern[0] != 0)
+                    ++pattern;
             }
-            if (pattern[0] != 0)
-                ++pattern;
-        }
 
-        uint32_t pixel = 0;
-        if (cursor.format == DRM_FORMAT_RGBA8888)
-            pixel = (i<<24)|(i<<16)|(i<<8)|(a<<0);
-        else if (cursor.format == DRM_FORMAT_ARGB8888)
-            pixel = (a<<24)|(i<<16)|(i<<8)|(i<<0);
-        *pix++ = pixel;
+            /* dup color/alpha to fill required depth */
+            if (cursor.depth == 8)
+                c = (c<<20)|(c<<16)|(c<<12)|(c<<8)|(c<<4)|(c<<0), a = (a<<4)|(a<<0);
+            else if (cursor.depth == 5)
+                c = (c<<11)|(c<<6)|(c<<1), a = !!a;
+            else if (cursor.depth == 4)
+                c = (c<<8)|(c<<4)|(c<<0);
+            else
+                c = 0, a = 0;
+            /* shift color or alpha per pixel format */
+            uint32_t pixel = (cursor.shift > 0) ? (c<<cursor.shift)|a : (a<<-cursor.shift)|c;
+            /* save to pixel map in bytes to preserve ordering */
+            *pix++ = (uint8_t)(pixel>>0);
+            *pix++ = (uint8_t)(pixel>>8);
+            if (cursor.depth == 8) {
+                *pix++ = (uint8_t)(pixel>>16);
+                *pix++ = (uint8_t)(pixel>>24);
+            }
+        }
     }
     return(0);
 }
@@ -228,7 +282,7 @@ int set_cursor(const char *pattern)
 void move_cursor(int drm_fd, int crtc_id, int x, int y)
 {
     drmModeSetPlane(drm_fd, cursor.plane_id, crtc_id, cursor.fbuf_id, 0,
-        x+cursor.px, y+cursor.py, cursor.width, cursor.height,
+        x-cursor.px, y-cursor.py, cursor.width, cursor.height,
         0, 0, cursor.width<<16, cursor.height<<16);
 }
 
