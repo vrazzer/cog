@@ -52,16 +52,11 @@ G_DECLARE_DERIVABLE_TYPE(CogCoreView, cog_core_view, COG, CORE_VIEW, CogView)
 G_DEFINE_TYPE(CogCoreView, cog_core_view, COG_TYPE_VIEW)
 
 static struct {
-    uint32_t fr_key;
-    uint32_t fr_mod;
-    uint32_t to_key;
-    uint32_t to_mod;
-} g_keymap[1024] = { 0 };
-
-static struct {
-    uint32_t key;
-    int32_t val;
-} g_custom[256] = { 0 };
+    uint32_t fr0;
+    uint32_t fr1;
+    uint32_t to0;
+    uint32_t to1;
+} g_remap[1024] = { 0 };
 
 static GObject *
 cog_view_constructor(GType type, unsigned n_properties, GObjectConstructParam *properties)
@@ -382,15 +377,42 @@ cog_view_handle_key_event(CogView *self, const struct wpe_input_keyboard_event *
     wpe_view_backend_dispatch_keyboard_event(cog_view_get_backend_internal(self), &event_copy);
 }
 
+/* convert symbol to two uint32s for lookup */
+static const char *
+cog_view_remap_symbol(uint32_t *s0, uint32_t *s1, const char *sym)
+{
+    for (*s0 = *s1 = 0; (*sym > ' ') && (*sym != '='); ++sym) {
+        if (*s0 < 0x010000)
+            *s0 = (*s0<<8)|(*s1>>24), *s1 = (*s1<<8)|g_ascii_tolower(*sym);
+    }
+    *s0 |= 0xff000000;
+    return(sym);
+}
+
+/* lookup symbol within remap table */
+uint32_t
+cog_view_remap_parm(const char *sym, int32_t def)
+{
+    uint32_t fr0, fr1;
+    cog_view_remap_symbol(&fr0, &fr1, sym);
+
+    for (int i = 0; !!g_remap[i].fr0; ++i) {
+        if ((g_remap[i].fr0 == fr0) && (g_remap[i].fr1 == fr1))
+            return(g_remap[i].to0);
+    }
+    return(def);
+}
+
+/* lookup key/modification within remap table */ 
 gboolean
 cog_view_remap_event(struct wpe_input_keyboard_event *event)
 {
     uint32_t key = event->key_code;
     uint32_t mod = event->modifiers;
-    for (int i = 0; (i < sizeof(g_keymap)/sizeof(g_keymap[0])) && !!g_keymap[i].fr_key; ++i) {
-        if ((key == g_keymap[i].fr_key) && (mod == g_keymap[i].fr_mod)) {
-            event->key_code = g_keymap[i].to_key;
-            event->modifiers = g_keymap[i].to_mod;
+    for (int i = 0; !!g_remap[i].fr0; ++i) {
+        if ((key == g_remap[i].fr0) && (mod == g_remap[i].fr1)) {
+            event->key_code = g_remap[i].to0;
+            event->modifiers = g_remap[i].to1;
             if (event->key_code == WPE_KEY_VoidSymbol)
                 event->time = 0;
             g_warning("remap-fr: %d(%02x):%d(%02x)", key, key, mod, mod);
@@ -401,28 +423,12 @@ cog_view_remap_event(struct wpe_input_keyboard_event *event)
     return((event->key_code != key) || (event->modifiers != mod));
 }
 
-int32_t
-cog_view_remap_parm(const char *skey, int32_t def)
-{
-    uint32_t key = 0;
-    for (; (*skey >= 'a') && (*skey <= 'z'); ++skey)
-        if (key < 0x01000000)
-            key = (key<<8) | *skey;
-
-    for (int i = 0; (i < sizeof(g_custom)/sizeof(g_custom[0])) && !!g_custom[i].key; ++i) {
-        if (g_custom[i].key == key)
-            return(g_custom[i].val);
-    }
-    return(def);
-}
-
 /* install event remaps and custom parms for this page */
 gboolean
 cog_view_remap_import(const char *uri)
 {
     /* clear keymap and custom parms */
-    memset(&g_keymap[0], 0, sizeof(g_keymap[0]));
-    memset(&g_custom[0], 0, sizeof(g_custom[0]));
+    g_remap[0].fr0 = g_remap[0].fr1 = 0;
 
     /* use COG_URL_KEYMAP to determine specific mapping for this url */
     const gchar *cmp = g_getenv("COG_KEYMAP_URL");
@@ -448,32 +454,27 @@ cog_view_remap_import(const char *uri)
             g_warning("COG_URL_KEYMAP referenced missing env(%s)", seg[env]+1);
 
         /* key=val[comment], ... where key/val are dec or hex */
-        int ki = 0, ci = 0;
-        for (const gchar *s = map; (s != NULL) && (*s != 0);) {
+        int idx = 0;
+        for (const gchar *s = map; !!s && !!*s && (idx+1 < sizeof(g_remap)/sizeof(g_remap[0]));) {
             while ((*s > 0) && (*s <= ' '))
                 ++s;
             if (*s == '$') {
                 /* handle custom parms: $key=val */
-                g_custom[ci].key = 0;
-                for (++s; (*s >= 'a') && (*s <= 'z'); ++s) {
-                    if (g_custom[ci].key < 0x01000000)
-                        g_custom[ci].key = (g_custom[ci].key<<8) | *s;
-                }
+                s = cog_view_remap_symbol(&g_remap[idx].fr0, &g_remap[idx].fr1, s+1);
                 if (*s != '=')
                     break;
-                g_custom[ci].val = g_ascii_strtoll(s+1, (gchar **)&s, 0);
-                if (ci+1 < sizeof(g_custom)/sizeof(g_custom[0]))
-                    ++ci;
+                g_remap[idx].to0 = g_ascii_strtoll(s+1, (gchar **)&s, 0);
+                g_remap[idx].to1 = 0;
+                ++idx;
             } else {
                 /* handle remap: key:mod=new-key:new-mod */
-                g_keymap[ki].fr_key = g_ascii_strtoll(s, (gchar **)&s, 0);
-                g_keymap[ki].fr_mod = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
+                g_remap[idx].fr0 = g_ascii_strtoll(s, (gchar **)&s, 0);
+                g_remap[idx].fr1 = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
                 if (*s != '=')
                     break;
-                g_keymap[ki].to_key = g_ascii_strtoll(s+1, (gchar **)&s, 0);
-                g_keymap[ki].to_mod = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
-                if (ki+1 < sizeof(g_keymap)/sizeof(g_keymap[0]))
-                    ++ki;
+                g_remap[idx].to0 = g_ascii_strtoll(s+1, (gchar **)&s, 0);
+                g_remap[idx].to1 = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
+                ++idx;
             }
             /* gobble chars after key=val until comma to allow for comments */
             while ((*s > 0) && (*s != ','))
@@ -481,10 +482,33 @@ cog_view_remap_import(const char *uri)
             if (*s == ',')
                 ++s;
         }
-        g_keymap[ki].fr_key = g_keymap[ki].fr_mod = 0;
-        g_custom[ci].key = 0;
+        g_remap[idx].fr0 = g_remap[idx].fr1 = 0;
     }
     g_strfreev(seg);
+
+    /* dump the completed remap */
+    int i = 0;
+    for (; !!g_remap[i].fr0; ++i) {
+        char line[256];
+        uint32_t fr0 = g_remap[i].fr0;
+        uint32_t fr1 = g_remap[i].fr1;
+        if ((fr0>>24) == 0xff) {
+            char *s = line+g_strlcpy(line, "symbol: $", sizeof(line));
+            while (!!fr0 || !!fr1) {
+                if ((fr0 >= 0x21000000) && (fr0 < 0x7f000000))
+                    *s++ = (fr0>>24);
+                fr0 = (fr0<<8) | (fr1>>24);
+                fr1 <<= 8;
+            }
+            *s = 0;
+            g_print("=%u\n", g_remap[i].to0);
+        } else {
+            g_snprintf(line, sizeof(line), "keymap: %04x:%02x -> %04x:%02x",
+                    fr0, fr1, g_remap[i].to0, g_remap[i].to1);
+        }
+        g_debug(line);
+    }
+    g_debug("remap table contains %d entries", i);
     return(0);
 }
 
