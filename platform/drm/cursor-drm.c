@@ -101,9 +101,6 @@ const static struct {
     int shift; /* <0=alpha shift, >0=color shift */
 } layout[] = {
     /* ordered highest to lowest priority */
-    { DRM_FORMAT_ABGR1555, 5, -15 },
-
-
     { DRM_FORMAT_ARGB8888, 8, -24 },
     { DRM_FORMAT_ABGR8888, 8, -24 },
     { DRM_FORMAT_RGBA8888, 8,  24 },
