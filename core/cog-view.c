@@ -415,8 +415,8 @@ cog_view_remap_event(struct wpe_input_keyboard_event *event)
             event->modifiers = g_remap[i].to1;
             if (event->key_code == WPE_KEY_VoidSymbol)
                 event->time = 0;
-            g_warning("remap-fr: %d(%02x):%d(%02x)", key, key, mod, mod);
-            g_warning("remap-to: %d(%02x):%d(%02x)", event->key_code, event->key_code, event->modifiers, event->modifiers);
+            g_print("remap-fr: %d(%02x):%d(%02x)\n", key, key, mod, mod);
+            g_print("remap-to: %d(%02x):%d(%02x)\n", event->key_code, event->key_code, event->modifiers, event->modifiers);
             break;
         }
     }
@@ -425,7 +425,7 @@ cog_view_remap_event(struct wpe_input_keyboard_event *event)
 
 /* install event remaps and custom parms for this page */
 gboolean
-cog_view_remap_import(const char *uri)
+cog_view_remap_import(const char *url)
 {
     /* clear keymap and custom parms */
     g_remap[0].fr0 = g_remap[0].fr1 = 0;
@@ -434,24 +434,23 @@ cog_view_remap_import(const char *uri)
     const gchar *cmp = g_getenv("COG_KEYMAP_URL");
     if (cmp == NULL)
         return(0);
-    g_warning("on_load_changed: cmp=%s uri=(%s)", cmp, uri);
 
     int env = -1;
     gchar **seg = g_strsplit(cmp, ",", 256);
     if (seg == NULL)
         return(0);
     for (int i = 0; seg[i] != NULL; ++i) {
-        if (seg[i][0] == '#')
+        if (seg[i][0] == '@')
             env = i;
-        else if (g_strstr_len(uri, -1, seg[i]) != NULL)
+        else if (g_pattern_match_simple(seg[i], url))
             break;
     }
 
     if (env >= 0) {
-        g_warning("keymapping via %s", seg[env]);
         const gchar *map = g_getenv(seg[env]+1);
         if (map == NULL)
             g_warning("COG_URL_KEYMAP referenced missing env(%s)", seg[env]+1);
+        g_debug("cog_view_remap_import(%s): %s -> %s\n", url, seg[env], map);
 
         /* key=val[comment], ... where key/val are dec or hex */
         int idx = 0;
@@ -501,7 +500,6 @@ cog_view_remap_import(const char *uri)
                 fr1 <<= 8;
             }
             *s = 0;
-            g_print("=%u\n", g_remap[i].to0);
         } else {
             g_snprintf(line, sizeof(line), "keymap: %04x:%02x -> %04x:%02x",
                     fr0, fr1, g_remap[i].to0, g_remap[i].to1);
