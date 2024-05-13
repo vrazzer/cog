@@ -383,3 +383,61 @@ cog_option_entries_from_class (GObjectClass *klass)
 
     return g_steal_pointer (&entries);
 }
+
+/**
+ * cog_uri_get_env:
+ * @uri: Current uri-string to match against
+ * @filt: Data-ref(s) and uri-glob-pattern(s) used to select actions.
+ *   A sequence of |-separated  data-refs and uri-glob-patterns that
+ *   act as selectors. When a uri-pattern matches, the most recent
+ *   preceding data-ref is selected. A trailing data-ref is an else
+ *   selector.
+ *
+ *   Patterns are selected by a tilda (~) and use glob syntax.
+ *   Data-refs starting with $ return that environment variable.
+ *   Leading/trailing whitespace around elements is ignored.
+ *
+ * Examples:
+ *   $SPECIAL_CONFIG|~http:*|$DEFAULT_CONFIG
+ *   Returns $SPECIAL_CONFIG env-var contents for http:-uris and
+ *   $DEFAULT_CONFIG for all others. 
+ *   http:*|$OTHER_CONFIG
+ *   Returns NULL for http:-uris and $OTHER_CONFIG contents for others.
+ *   CURSOR=0 SCROLL=0 | ~https:*|$DEFAULT_TWEAKS
+ *   Returns "CURSOR=0 SCROLL=0" for https:-uris and $DEFAULT_TWEAKS
+ *   env-var for others.
+ *
+ *   Caller must free return string with g_free.
+ */
+const gchar*
+cog_uri_get_env(const gchar *uri, const gchar *filt)
+{
+    gchar **cmp = filt ? g_strsplit(filt, "|", 256) : NULL;
+    if (cmp == NULL)
+        return(NULL);
+
+    int idx;
+    const gchar *ref = NULL;
+    for (idx = 0; cmp[idx] != NULL; ++idx) {
+        gchar *s = cmp[idx];
+        g_strstrip(s);
+        if ((*s == '~') && uri && g_pattern_match_simple(s+1, uri))
+            break;
+        else 
+            ref = cmp[idx];
+    }
+
+    /* in non-match case, skip non-final ref */
+    if ((cmp[idx] == NULL) && (idx > 0) && (ref != cmp[idx-1]))
+        ref = NULL;
+
+    /* allow lookup of environment variable */
+    if ((ref != NULL) && (ref[0] == '$'))
+        ref = g_getenv(ref+1);
+
+    gchar *ret = g_strdup(ref);
+    g_print("cog_uri_get_env(%s): filt=%s ret=%s\n", uri, filt, ret);
+    g_strfreev(cmp);
+    return(ret);
+}
+

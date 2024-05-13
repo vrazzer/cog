@@ -51,5 +51,7 @@ cog_g_enum_get_value (GType enum_type, const char *nick)
     return g_enum_get_value_by_nick (enum_class, nick);
 }
 
+const gchar*
+cog_uri_get_env(const gchar *uri, const gchar *filt);
 
 G_END_DECLS
