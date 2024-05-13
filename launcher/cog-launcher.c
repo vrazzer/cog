@@ -1555,6 +1555,13 @@ cog_launcher_get_shell(CogLauncher *launcher)
     return launcher->shell;
 }
 
+CogViewport *
+cog_launcher_get_viewport(CogLauncher *launcher)
+{
+    g_return_val_if_fail(COG_IS_LAUNCHER(launcher), NULL);
+    return launcher->viewport;
+}
+
 /**
  * cog_launcher_is_automated:
  *

@@ -27,6 +27,7 @@ typedef enum {
 
 CogLauncher              *cog_launcher_new(CogSessionType session_type);
 CogShell                 *cog_launcher_get_shell(CogLauncher *launcher);
+CogViewport              *cog_launcher_get_viewport(CogLauncher *launcher);
 gboolean                  cog_launcher_is_automated(CogLauncher *launcher);
 WebKitSettings           *cog_launcher_get_webkit_settings(CogLauncher *launcher);
 WebKitWebsiteDataManager *cog_launcher_get_web_data_manager(CogLauncher *launcher);
