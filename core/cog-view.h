@@ -50,10 +50,10 @@ COG_API
 gboolean cog_view_remap_import(const char *url);
 
 COG_API
-uint32_t cog_view_remap_parm(const char *skey, int32_t def);
+int cog_view_tweak_value(CogView *self, const char *key, int32_t def);
 
 COG_API
-gboolean cog_view_remap_event(struct wpe_input_keyboard_event *event);
+gboolean cog_view_remap_event(CogView *self, struct wpe_input_keyboard_event *event, int *repeat, int *gobble);
 
 COG_API
 void cog_view_set_use_key_bindings(CogView *self, gboolean enable);

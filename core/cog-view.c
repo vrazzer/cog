@@ -8,6 +8,7 @@
 #include "cog-view.h"
 #include "cog-platform.h"
 #include "cog-view-private.h"
+#include "cog-utils.h"
 
 /**
  * CogView:
@@ -29,6 +30,15 @@ typedef struct {
     gboolean use_key_bindings;
 
     GWeakRef viewport; /* Weak reference to the associated CogViewport */
+
+    char tweaks[1024];
+    struct {
+        uint32_t fkey;
+        uint32_t fmod;
+        uint32_t tkey;
+        uint32_t tmod;
+    } keymap[1024];
+
 } CogViewPrivate;
 
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE(CogView, cog_view, WEBKIT_TYPE_WEB_VIEW)
@@ -48,15 +58,11 @@ static GParamSpec *s_properties[N_PROPERTIES] = {
     NULL,
 };
 
+/* a non-conflicting modifier for non-repeating remapped keys */
+enum { wpe_input_keyboard_modifier_no_repeat = 1<<7 };
+
 G_DECLARE_DERIVABLE_TYPE(CogCoreView, cog_core_view, COG, CORE_VIEW, CogView)
 G_DEFINE_TYPE(CogCoreView, cog_core_view, COG_TYPE_VIEW)
-
-static struct {
-    uint32_t fr0;
-    uint32_t fr1;
-    uint32_t to0;
-    uint32_t to1;
-} g_remap[1024] = { 0 };
 
 static GObject *
 cog_view_constructor(GType type, unsigned n_properties, GObjectConstructParam *properties)
@@ -107,6 +113,79 @@ cog_view_get_property(GObject *object, unsigned prop_id, GValue *value, GParamSp
 }
 
 static void
+on_load_changed(WebKitWebView *web_view, WebKitLoadEvent event, void *userdata)
+{
+    CogView *self = COG_VIEW(web_view);
+    CogViewPrivate *priv = cog_view_get_instance_private(COG_VIEW(self));
+    const gchar *uri = webkit_web_view_get_uri(web_view);
+
+    /* load tweaks at WEBKIT_LOAD_COMMITTED for WEBKIT_LOAD_FINISHED listeners */
+    if (event != WEBKIT_LOAD_COMMITTED) {
+        /* load the tweaks-- uri first so takes precedent */
+        const gchar *tweak_uri = cog_uri_get_env(uri, g_getenv("COG_TWEAKS_URI"));
+        const gchar *tweak_all = g_getenv("COG_TWEAKS_ALL");
+        g_snprintf(priv->tweaks, sizeof(priv->tweaks), " %s %s",
+                tweak_uri ? tweak_uri : "", tweak_all ? tweak_all : "");
+        g_ascii_strup(priv->tweaks, -1);
+        g_free((void*)tweak_uri);
+        g_free((void*)tweak_all);
+    }
+
+    if (event == WEBKIT_LOAD_FINISHED) {
+        /* load any javascript injections-- all first so uri can override */
+        const gchar *js_uri = cog_uri_get_env(uri, g_getenv("COG_EXECJS_URI"));
+        if ((js_uri != NULL) && (js_uri[0] != 0))
+            webkit_web_view_run_javascript(web_view, js_uri, NULL, NULL, NULL);
+        g_free((void*)js_uri);
+        const gchar *js_all = g_getenv("COG_EXECJS_ALL");
+        if ((js_all != NULL) && (js_all[0] != 0))
+            webkit_web_view_run_javascript(web_view, js_all, NULL, NULL, NULL);
+        g_free((void*)js_all);
+    }
+
+    /* load keymap at finished-- uri first so takes precedent */
+    const gchar *keymap[] = {
+        cog_uri_get_env(uri, g_getenv("COG_KEYMAP_URI")),
+        g_getenv("COG_KEYMAP_ALL"), NULL };
+    if (event != WEBKIT_LOAD_FINISHED)
+        return;
+
+    int cnt = 0;
+    for (int idx = 0; keymap[idx] != NULL; ++idx) {
+        const gchar *s = keymap[idx];
+        g_print("s(%d)=%s\n", idx, s);
+        /* key=val[comment], ... where key/val are dec or hex */
+        while (!!s && !!*s && (cnt+1 < sizeof(priv->keymap)/sizeof(priv->keymap[0]))) {
+            while ((*s > 0) && (*s <= ' '))
+                ++s;
+            /* handle remap: key:mod=new-key:new-mod */
+            priv->keymap[cnt].fkey = g_ascii_strtoll(s, (gchar **)&s, 0);
+            priv->keymap[cnt].fmod = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
+            if (*s != '=')
+                break;
+            priv->keymap[cnt].tkey = g_ascii_strtoll(s+1, (gchar **)&s, 0);
+            priv->keymap[cnt].tmod = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
+            if (*s == '!')
+                priv->keymap[cnt].tmod |= wpe_input_keyboard_modifier_no_repeat;
+            ++cnt;
+            /* gobble text after key=val until comma to allow for mini-comments */
+            while ((*s > 0) && (*s != ',') && (*s != '|'))
+                ++s;
+            if ((*s == ',') || (*s == '|'))
+                ++s;
+        }
+        g_free((void*)keymap[idx]);
+    }
+    priv->keymap[cnt].fkey = priv->keymap[cnt].fmod = 0;
+
+    /* dump the completed remap */
+    for (int i = 0; !!priv->keymap[i].fkey; ++i) {
+        g_warning("keymap(%d): %04x:%02x -> %04x:%02x", i,
+            priv->keymap[i].fkey, priv->keymap[i].fmod, priv->keymap[i].tkey, priv->keymap[i].tmod);
+    }
+}
+
+static void
 cog_view_class_init(CogViewClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
@@ -145,6 +224,9 @@ cog_view_init(CogView *self)
 
     // Init the weak reference to the CogViewport.
     g_weak_ref_init(&priv->viewport, NULL);
+
+    // listen for load-changed to load keymap tables
+    g_signal_connect(self, "load-changed", G_CALLBACK(on_load_changed), NULL);
 }
 
 static inline struct wpe_view_backend *
@@ -377,137 +459,48 @@ cog_view_handle_key_event(CogView *self, const struct wpe_input_keyboard_event *
     wpe_view_backend_dispatch_keyboard_event(cog_view_get_backend_internal(self), &event_copy);
 }
 
-/* convert symbol to two uint32s for lookup */
-static const char *
-cog_view_remap_symbol(uint32_t *s0, uint32_t *s1, const char *sym)
+/* return tweaks value */
+int cog_view_tweak_value(CogView *self, const gchar *key, int def)
 {
-    for (*s0 = *s1 = 0; (*sym > ' ') && (*sym != '='); ++sym) {
-        if (*s0 < 0x010000)
-            *s0 = (*s0<<8)|(*s1>>24), *s1 = (*s1<<8)|g_ascii_tolower(*sym);
-    }
-    *s0 |= 0xff000000;
-    return(sym);
-}
+    CogViewPrivate *priv = cog_view_get_instance_private(COG_VIEW(self));
+    if ((priv->tweaks[0] == 0) || (key == NULL) || (key[0] == 0))
+        return(def);
 
-/* lookup symbol within remap table */
-uint32_t
-cog_view_remap_parm(const char *sym, int32_t def)
-{
-    uint32_t fr0, fr1;
-    cog_view_remap_symbol(&fr0, &fr1, sym);
-
-    for (int i = 0; !!g_remap[i].fr0; ++i) {
-        if ((g_remap[i].fr0 == fr0) && (g_remap[i].fr1 == fr1))
-            return(g_remap[i].to0);
+    int len = strlen(key);
+    const gchar *s = priv->tweaks-1;
+    while ((s = strstr(s+1, key)) != NULL) {
+        if (((s == priv->tweaks) || (s[-1] <= ' ')) && (s[len] == '=')) {
+            g_debug("cog_view_tweak_value: %s=%s\n", key, s+len+1);
+            return(g_ascii_strtoll(s+len+1, NULL, 0));
+        }
     }
     return(def);
 }
 
-/* lookup key/modification within remap table */ 
+/* check for and apply keymap entry */
 gboolean
-cog_view_remap_event(struct wpe_input_keyboard_event *event)
+cog_view_remap_event(CogView *self, struct wpe_input_keyboard_event *event, int *repeat, int *gobble)
 {
-    uint32_t key = event->key_code;
-    uint32_t mod = event->modifiers;
-    for (int i = 0; !!g_remap[i].fr0; ++i) {
-        if ((key == g_remap[i].fr0) && (mod == g_remap[i].fr1)) {
-            event->key_code = g_remap[i].to0;
-            event->modifiers = g_remap[i].to1;
-            if (event->key_code == WPE_KEY_VoidSymbol)
-                event->time = 0;
-            g_print("remap-fr: %d(%02x):%d(%02x)\n", key, key, mod, mod);
-            g_print("remap-to: %d(%02x):%d(%02x)\n", event->key_code, event->key_code, event->modifiers, event->modifiers);
+    CogViewPrivate *priv = cog_view_get_instance_private(COG_VIEW(self));
+
+    uint32_t orig_key = event->key_code;
+    uint32_t orig_mod = event->modifiers;
+    for (int i = 0; !!priv->keymap[i].fkey; ++i) {
+        if ((orig_key == priv->keymap[i].fkey) && (orig_mod == priv->keymap[i].fmod)) {
+            event->key_code = priv->keymap[i].tkey;
+            event->modifiers = priv->keymap[i].tmod;
+            *repeat = 1;
+            if (event->modifiers & wpe_input_keyboard_modifier_no_repeat)
+                *repeat = 0, event->modifiers ^= wpe_input_keyboard_modifier_no_repeat;
+            *gobble = (event->key_code == 0);
+            g_print("remap: %d(%02x):%d(%02x) -> %d(%02x):%d(%02x) rep=%d gob=%d\n",
+                orig_key, orig_key, orig_mod, orig_mod,
+                event->key_code, event->key_code, event->modifiers, event->modifiers,
+                *repeat, *gobble);
             break;
         }
     }
-    return((event->key_code != key) || (event->modifiers != mod));
-}
-
-/* install event remaps and custom parms for this page */
-gboolean
-cog_view_remap_import(const char *url)
-{
-    /* clear keymap and custom parms */
-    g_remap[0].fr0 = g_remap[0].fr1 = 0;
-
-    /* use COG_URL_KEYMAP to determine specific mapping for this url */
-    const gchar *cmp = g_getenv("COG_KEYMAP_URL");
-    if (cmp == NULL)
-        return(0);
-
-    int env = -1;
-    gchar **seg = g_strsplit(cmp, ",", 256);
-    if (seg == NULL)
-        return(0);
-    for (int i = 0; seg[i] != NULL; ++i) {
-        if (seg[i][0] == '@')
-            env = i;
-        else if (g_pattern_match_simple(seg[i], url))
-            break;
-    }
-
-    if (env >= 0) {
-        const gchar *map = g_getenv(seg[env]+1);
-        if (map == NULL)
-            g_warning("COG_URL_KEYMAP referenced missing env(%s)", seg[env]+1);
-        g_debug("cog_view_remap_import(%s): %s -> %s\n", url, seg[env], map);
-
-        /* key=val[comment], ... where key/val are dec or hex */
-        int idx = 0;
-        for (const gchar *s = map; !!s && !!*s && (idx+1 < sizeof(g_remap)/sizeof(g_remap[0]));) {
-            while ((*s > 0) && (*s <= ' '))
-                ++s;
-            if (*s == '$') {
-                /* handle custom parms: $key=val */
-                s = cog_view_remap_symbol(&g_remap[idx].fr0, &g_remap[idx].fr1, s+1);
-                if (*s != '=')
-                    break;
-                g_remap[idx].to0 = g_ascii_strtoll(s+1, (gchar **)&s, 0);
-                g_remap[idx].to1 = 0;
-                ++idx;
-            } else {
-                /* handle remap: key:mod=new-key:new-mod */
-                g_remap[idx].fr0 = g_ascii_strtoll(s, (gchar **)&s, 0);
-                g_remap[idx].fr1 = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
-                if (*s != '=')
-                    break;
-                g_remap[idx].to0 = g_ascii_strtoll(s+1, (gchar **)&s, 0);
-                g_remap[idx].to1 = (*s == ':') ? g_ascii_strtoll(s+1, (gchar **)&s, 0) : 0;
-                ++idx;
-            }
-            /* gobble chars after key=val until comma to allow for comments */
-            while ((*s > 0) && (*s != ','))
-                ++s;
-            if (*s == ',')
-                ++s;
-        }
-        g_remap[idx].fr0 = g_remap[idx].fr1 = 0;
-    }
-    g_strfreev(seg);
-
-    /* dump the completed remap */
-    int i = 0;
-    for (; !!g_remap[i].fr0; ++i) {
-        char line[256];
-        uint32_t fr0 = g_remap[i].fr0;
-        uint32_t fr1 = g_remap[i].fr1;
-        if ((fr0>>24) == 0xff) {
-            char *s = line+g_strlcpy(line, "symbol: $", sizeof(line));
-            while (!!fr0 || !!fr1) {
-                if ((fr0 >= 0x21000000) && (fr0 < 0x7f000000))
-                    *s++ = (fr0>>24);
-                fr0 = (fr0<<8) | (fr1>>24);
-                fr1 <<= 8;
-            }
-            *s = 0;
-        } else {
-            g_snprintf(line, sizeof(line), "keymap: %04x:%02x -> %04x:%02x",
-                    fr0, fr1, g_remap[i].to0, g_remap[i].to1);
-        }
-        g_debug(line);
-    }
-    g_debug("remap table contains %d entries", i);
-    return(0);
+    return((event->key_code != orig_key) || (event->modifiers != orig_mod));
 }
 
 /**
