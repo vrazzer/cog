@@ -153,18 +153,16 @@ static struct {
 
 static struct {
     gboolean enabled;
-    struct kms_device *device;
-    struct kms_plane *plane;
-    struct kms_framebuffer *cursor;
+    gboolean hidden;
+    gboolean scroll;
     unsigned int x;
     unsigned int y;
     unsigned int screen_width;
     unsigned int screen_height;
 } cursor = {
     .enabled = FALSE,
-    .device = NULL,
-    .plane = NULL,
-    .cursor = NULL,
+    .hidden = TRUE,
+    .scroll = TRUE,
 };
 
 static struct {
@@ -192,6 +190,7 @@ static struct {
     uint32_t input_height;
 
     struct wpe_input_keyboard_event key_repeat_event;
+    uint32_t last_modifiers;
 
     struct wpe_input_touch_event_raw touch_points[10];
     enum wpe_input_touch_event_type last_touch_type;
@@ -204,6 +203,7 @@ static struct {
     .key_repeat_event = { 0 },
     .last_touch_type = wpe_input_touch_event_type_null,
     .last_touch_id = 0,
+    .last_modifiers = 0,
 };
 
 static struct {
@@ -630,10 +630,52 @@ init_egl (void)
     return TRUE;
 }
 
+/* dispatch key event with optional key remapping */
+static gboolean
+input_dispatch_key_event(CogView *view, struct wpe_input_keyboard_event *event, int remap)
+{
+    int repeat = 1, gobble = 0;
+    if (!cog_view_remap_event(view, event, &repeat, &gobble) && remap)
+        return(false);
+    if (cog_view_try_handle_key_binding(view, event))
+        repeat = 0, gobble = 1;
+    if (!gobble)
+        wpe_view_backend_dispatch_keyboard_event(wpe_view_data.backend, event);
+
+    if (!repeat)
+        ;
+    else if (!event->pressed) {
+        g_print("input_dispatch_key_event: clear repeat\n");
+        input_data.key_repeat_event.time = 0;
+        g_source_set_ready_time(glib_data.key_repeat_source, -1);
+    } else if (!!memcmp(&input_data.key_repeat_event, event, sizeof(*event))) {
+        g_print("input_dispatch_key_event: start repeat\n");
+        memcpy(&input_data.key_repeat_event, event, sizeof(*event));
+        g_source_set_ready_time(glib_data.key_repeat_source, g_get_monotonic_time()+KEY_STARTUP_DELAY);
+    }
+    return(true);
+}
+
+/* resend the pre-staged key-event */
+static gboolean
+input_dispatch_repeat_event(GSource *base, GSourceFunc callback, gpointer user_data)
+{
+    if (!input_data.key_repeat_event.time) {
+        g_print("input_dispatch_repeat_event: clear repeat\n");
+        g_source_set_ready_time(glib_data.key_repeat_source, -1);
+    } else {
+        g_print("input_dispatch_repeat_event: send repeat\n");
+        g_source_set_ready_time(glib_data.key_repeat_source, g_get_monotonic_time()+KEY_REPEAT_DELAY);
+        wpe_view_backend_dispatch_keyboard_event(wpe_view_data.backend, &input_data.key_repeat_event);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
 static void
 input_handle_key_event(CogView *view, struct libinput_event_keyboard *key_event)
 {
     struct wpe_input_xkb_context *default_context = wpe_input_xkb_context_get_default ();
+    g_print("input_handle_key_event\n");
 
     // if wpe is unable to prepare an xkb context (e.g. environment without
     // any prepared keymap data), ignore the key event
@@ -665,7 +707,11 @@ input_handle_key_event(CogView *view, struct libinput_event_keyboard *key_event)
         xkb_state_serialize_mods (context_state, XKB_STATE_MODS_LATCHED),
         xkb_state_serialize_mods (context_state, XKB_STATE_MODS_LOCKED),
         xkb_state_serialize_layout (context_state, XKB_STATE_LAYOUT_EFFECTIVE));
+    g_print("input: %d(%02x):%d(%02x) -> %d(%02x):%d(%02x)\n",
+            key, key, state, state,
+            keysym, keysym, modifiers, modifiers);
 
+    /* dispatch the key event w/optional remap */
     struct wpe_input_keyboard_event event = {
             .time = time,
             .key_code = keysym,
@@ -673,16 +719,7 @@ input_handle_key_event(CogView *view, struct libinput_event_keyboard *key_event)
             .pressed = (!!state),
             .modifiers = modifiers,
     };
-    cog_view_handle_key_event(view, &event);
-
-    g_warning("input_handle_key_event: state=%d\n", state);
-    if (!state) {
-        input_data.key_repeat_event.time = 0;
-        g_source_set_ready_time(glib_data.key_repeat_source, -1);
-    } else if (!!memcmp(&input_data.key_repeat_event, &event, sizeof(event))) {
-        memcpy(&input_data.key_repeat_event, &event, sizeof(event));
-        g_source_set_ready_time(glib_data.key_repeat_source, g_get_monotonic_time()+KEY_STARTUP_DELAY);
-    }
+    input_dispatch_key_event(view, &event, false);
 }
 
 static void
@@ -750,9 +787,11 @@ input_handle_touch_event (enum libinput_event_type touch_type, struct libinput_e
 }
 
 static void
-input_handle_pointer_motion_event(struct libinput_event_pointer *pointer_event, bool absolute)
+input_handle_pointer_motion_event(CogView *view, struct libinput_event_pointer *pointer_event, bool absolute)
 {
     if (!cursor.enabled)
+        return;
+    if (cursor.hidden)
         return;
 
     if (absolute) {
@@ -775,43 +814,75 @@ input_handle_pointer_motion_event(struct libinput_event_pointer *pointer_event, 
         cursor.y = cursor.screen_height - 1;
     }
 
+    move_cursor(drm_data.fd, drm_data.crtc.obj_id, cursor.x, cursor.y);
+
     struct wpe_input_pointer_event event = {
         .type = wpe_input_pointer_event_type_motion,
         .time = libinput_event_pointer_get_time(pointer_event),
         .x = cursor.x,
         .y = cursor.y,
-        .button = 0,
-        .state = 0,
-        .modifiers = 0,
+        .button = !!input_data.last_modifiers ? 1 : 0,
+        .state = !!input_data.last_modifiers,
+        .modifiers = input_data.last_modifiers,
     };
-
     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
-    move_cursor(drm_data.fd, drm_data.crtc.obj_id, cursor.x, cursor.y);
+    //g_print("pointer.movement: btn=%d st=%d mod=%08x\n", event.button, event.state, event.modifiers);
 }
 
 static void
-input_handle_pointer_button_event (struct libinput_event_pointer *pointer_event)
+input_handle_pointer_button_event (CogView *view, struct libinput_event_pointer *pointer_event)
 {
+    uint32_t button = libinput_event_pointer_get_button(pointer_event);
+    uint32_t state = libinput_event_pointer_get_button_state(pointer_event);
+    uint32_t time = libinput_event_pointer_get_time(pointer_event);
     if (!cursor.enabled)
         return;
 
-    struct wpe_input_pointer_event event = {
-        .type = wpe_input_pointer_event_type_button,
-        .time = libinput_event_pointer_get_time(pointer_event),
-        .x = cursor.x,
-        .y = cursor.y,
-        .button = libinput_event_pointer_get_button(pointer_event),
-        .state = libinput_event_pointer_get_button_state(pointer_event),
-        .modifiers = 0,
-    };
+    /* handle pointer-event remapping to keyboard-event */
+    /* map libinput codes into unused wpe 0xf000..0xf3ff range */
+    if ((button > 0) && (button <= KEY_MAX)) {
+        struct wpe_input_keyboard_event event = {
+            .time = time,
+            .key_code = 0xf000+button,
+            .hardware_key_code = button,
+            .pressed = state,
+            .modifiers = 0,
+        };
+        g_print("check-ptr: code=%04x hw=%04x state=%d\n", event.key_code, event.hardware_key_code, event.pressed);
 
-    /* raw codes are 0x0000-0x03ff: dispatch_pointer_event expects BTN_LEFT=1, BTN_RIGHT=2, etc */
-    if (event.button >= BTN_MOUSE)
-        event.button -= (BTN_MOUSE-1);
+        /* dispatch the key only if remapped (else handle below as pointer event) */
+        if (input_dispatch_key_event(view, &event, true))
+            return;
+    }
 
     /* note that BTN_RIGHT can trigger weirdness likely because drm has no default context menu */
     /* javascript can listen for 'context' (and call preventDefault) to draw a custom menu */
+    uint32_t modifiers = 0;
+    if (button == BTN_LEFT)
+        button = 1, modifiers = wpe_input_pointer_modifier_button1;
+    else if (button == BTN_RIGHT)
+        button = 2, modifiers = wpe_input_pointer_modifier_button2;
+    else if (button == BTN_MIDDLE)
+        button = 3, modifiers = wpe_input_pointer_modifier_button3;
+    else
+        button = 0, modifiers = 0;
+
+    /* setup as pointer event */
+    struct wpe_input_pointer_event event = {
+        .type = wpe_input_pointer_event_type_button,
+        .time = time,
+        .x = cursor.x,
+        .y = cursor.y,
+        .state = state,
+        .button = button,
+        .modifiers = modifiers,
+    };
     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
+    g_print("pointer.event: btn=%d st=%d mod=%08x\n", event.button, event.state, event.modifiers);
+
+    if (!state)
+        modifiers = 0;
+    input_data.last_modifiers = modifiers;
 }
 
 #if LIBINPUT_CHECK_VERSION(1, 19, 0)
@@ -840,6 +911,9 @@ input_handle_pointer_discrete_scroll_event(struct libinput_event_pointer *pointe
 static void
 input_handle_pointer_smooth_scroll_event(struct libinput_event_pointer *pointer_event)
 {
+    if (cursor.hidden)
+        return;
+
     struct wpe_input_axis_2d_event event = {
         .base.type = wpe_input_axis_event_type_mask_2d | wpe_input_axis_event_type_motion_smooth,
         .base.time = libinput_event_pointer_get_time(pointer_event),
@@ -862,6 +936,9 @@ input_handle_pointer_smooth_scroll_event(struct libinput_event_pointer *pointer_
 static void
 input_handle_pointer_axis_event(struct libinput_event_pointer *pointer_event)
 {
+    if (cursor.hidden)
+        return;
+
     struct wpe_input_axis_2d_event event = {
         .base.type = wpe_input_axis_event_type_mask_2d,
         .base.time = libinput_event_pointer_get_time(pointer_event),
@@ -1007,14 +1084,14 @@ input_process_events (void)
             break;
 
         case LIBINPUT_EVENT_POINTER_MOTION:
-            input_handle_pointer_motion_event(libinput_event_get_pointer_event(event), false);
+            input_handle_pointer_motion_event(platform->web_view, libinput_event_get_pointer_event(event), false);
             break;
         case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
-            input_handle_pointer_motion_event(libinput_event_get_pointer_event(event), true);
+            input_handle_pointer_motion_event(platform->web_view, libinput_event_get_pointer_event(event), true);
             break;
 
         case LIBINPUT_EVENT_POINTER_BUTTON:
-            input_handle_pointer_button_event(libinput_event_get_pointer_event(event));
+            input_handle_pointer_button_event(platform->web_view, libinput_event_get_pointer_event(event));
             break;
 
         case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN:
@@ -1200,20 +1277,6 @@ input_source_dispatch (GSource *base, GSourceFunc callback, gpointer user_data)
     return TRUE;
 }
 
-static gboolean
-key_repeat_source_dispatch(CogDrmPlatform *platform)
-{
-    if (!input_data.key_repeat_event.time) {
-        g_warning("key_repeat_source_dispatch: cancel");
-        g_source_set_ready_time(glib_data.key_repeat_source, -1);
-    } else {
-        g_warning("key_repeat_source_dispatch: send");
-        //g_source_set_ready_time(glib_data.key_repeat_source, g_get_monotonic_time()+KEY_REPEAT_DELAY);
-        cog_view_handle_key_event(platform->web_view, &input_data.key_repeat_event);
-    }
-    return G_SOURCE_CONTINUE;
-}
-
 static void
 cog_drm_platform_shell_device_factor_changed(CogShell *shell, GParamSpec *param_spec, gpointer data)
 {
@@ -1244,6 +1307,10 @@ init_glib(CogDrmPlatform *self)
         .dispatch = input_source_dispatch,
     };
 
+    static GSourceFuncs key_repeat_source_funcs = {
+        .dispatch = input_dispatch_repeat_event,
+    };
+
     glib_data.input_source = g_source_new (&input_source_funcs,
                                            sizeof (struct input_source));
     {
@@ -1258,14 +1325,13 @@ init_glib(CogDrmPlatform *self)
         g_source_attach (glib_data.input_source, g_main_context_get_thread_default ());
     }
 
-    glib_data.key_repeat_source = g_timeout_source_new(KEY_REPEAT_DELAY);
-    g_source_set_callback(glib_data.key_repeat_source, G_SOURCE_FUNC(key_repeat_source_dispatch), self, NULL);
-    g_source_set_ready_time(glib_data.key_repeat_source, -1);
+    /* changed repeat back to g_source_new as g_timeout_source_new only fires once per keydown */
+    glib_data.key_repeat_source = g_source_new (&key_repeat_source_funcs, sizeof (GSource));
     g_source_set_name(glib_data.key_repeat_source, "cog: key repeat");
+    g_source_set_can_recurse (glib_data.key_repeat_source, TRUE);
     g_source_set_priority (glib_data.key_repeat_source, G_PRIORITY_DEFAULT_IDLE);
     g_source_attach (glib_data.key_repeat_source, g_main_context_get_thread_default ());
-
-    return TRUE;
+    return(TRUE);
 }
 
 static void *
@@ -1325,6 +1391,7 @@ cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *param
             cursor.x = drm_data.width/2;
             cursor.y = drm_data.height/2;
             set_cursor("default");
+            move_cursor(drm_data.fd, drm_data.crtc.obj_id, cursor.x, cursor.y);
         } else {
             g_warning ("Failed to initialize cursor");
         }
@@ -1456,10 +1523,23 @@ on_mouse_target_changed(WebKitWebView *view, WebKitHitTestResult *hitTestResult,
     for (int i = 0; !set && cursor_names[i]; ++i) {
       set = !set_cursor(cursor_names[i]);
     }
-
-    /* if no names matched, force back to pointer */
     if (!set)
       set_cursor("pointer");
+}
+
+/* import the tweak values on page-load change */
+static void
+on_load_changed(WebKitWebView *web_view, WebKitLoadEvent event, void *userdata)
+{
+    if (event == WEBKIT_LOAD_FINISHED) {
+        CogView *view = COG_VIEW(web_view);
+        /* cursor=0 hides the cursor */
+        cursor.hidden = !cog_view_tweak_value(view, "CURSOR", 1);
+        /* scroll=0 ignores wheel-scroll events */
+        cursor.scroll =  cog_view_tweak_value(view, "SCROLL", 1);
+        if (cursor.hidden)
+            set_cursor("hidden");
+    }
 }
 
 static void
@@ -1467,11 +1547,16 @@ cog_drm_platform_init_web_view(CogPlatform *platform, WebKitWebView *view)
 {
     COG_DRM_PLATFORM(platform)->web_view = COG_VIEW(view);
 
+    WebKitWebContext *ctx = webkit_web_context_get_default();
+    webkit_web_context_set_process_model(ctx, WEBKIT_PROCESS_MODEL_MULTIPLE_SECONDARY_PROCESSES);
+
     wpe_view_backend_dispatch_set_device_scale_factor(wpe_view_data.backend, drm_data.device_scale);
+    wpe_view_backend_add_activity_state(wpe_view_data.backend, wpe_view_activity_state_focused);
 
     g_idle_add(G_SOURCE_FUNC(set_target_refresh_rate), &wpe_view_data);
 
     g_signal_connect(view, "mouse-target-changed", G_CALLBACK(on_mouse_target_changed), NULL);
+    g_signal_connect(view, "load-changed", G_CALLBACK(on_load_changed), NULL);
 }
 
 static void
