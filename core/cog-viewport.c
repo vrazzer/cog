@@ -248,7 +248,6 @@ cog_viewport_set_visible_view_internal(CogViewport *self, CogViewportPrivate *pr
     if (priv->visible_view) {
         struct wpe_view_backend *backend = cog_view_get_backend(priv->visible_view);
         wpe_view_backend_add_activity_state(backend, wpe_view_activity_state_visible);
-        wpe_view_backend_add_activity_state(backend, wpe_view_activity_state_focused);
     }
 }
 
