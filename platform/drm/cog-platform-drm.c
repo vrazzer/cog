@@ -577,6 +577,10 @@ init_drm(void)
     g_clear_pointer(&drm_data.base_resources, drmModeFreeResources);
     g_clear_pointer(&drm_data.plane_resources, drmModeFreePlaneResources);
 
+    /* save connector info for any external video helper apps that need it */
+    char conn_info[256];
+    g_snprintf(conn_info, sizeof(conn_info), "%d:%d", drm_data.fd, drm_data.connector.obj_id);
+    g_setenv("COG_PLATFORM_DRM_CONN_INFO", conn_info, true);
     return TRUE;
 }
 
@@ -1057,6 +1061,15 @@ input_process_events (void)
         struct libinput_event *event = libinput_get_event (input_data.libinput);
         if (!event)
             break;
+
+        /* view must be visible and focused to receive input */
+        uint32_t state = wpe_view_backend_get_activity_state(wpe_view_data.backend);
+        state &= wpe_view_activity_state_visible+wpe_view_activity_state_focused;
+        if (state != wpe_view_activity_state_visible+wpe_view_activity_state_focused) {
+            g_print("key-skip\n");
+            input_data.key_repeat_event.time = 0;
+            break;
+        }
 
         enum libinput_event_type event_type = libinput_event_get_type (event);
         switch (event_type) {
