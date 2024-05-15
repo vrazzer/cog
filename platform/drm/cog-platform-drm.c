@@ -1066,7 +1066,6 @@ input_process_events (void)
         uint32_t state = wpe_view_backend_get_activity_state(wpe_view_data.backend);
         state &= wpe_view_activity_state_visible+wpe_view_activity_state_focused;
         if (state != wpe_view_activity_state_visible+wpe_view_activity_state_focused) {
-            g_print("key-skip\n");
             input_data.key_repeat_event.time = 0;
             break;
         }
