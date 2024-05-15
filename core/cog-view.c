@@ -180,7 +180,7 @@ on_load_changed(WebKitWebView *web_view, WebKitLoadEvent event, void *userdata)
 
     /* dump the completed remap */
     for (int i = 0; !!priv->keymap[i].fkey; ++i) {
-        g_warning("keymap(%d): %04x:%02x -> %04x:%02x", i,
+        g_debug("keymap(%d): %04x:%02x -> %04x:%02x", i,
             priv->keymap[i].fkey, priv->keymap[i].fmod, priv->keymap[i].tkey, priv->keymap[i].tmod);
     }
 }
