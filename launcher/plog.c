@@ -149,6 +149,12 @@ static void on_message(WebKitUserContentManager *content, WebKitJavascriptResult
     struct wpe_view_backend *backend = cog_view_get_backend(view);
     wpe_view_backend_remove_activity_state(backend, wpe_view_activity_state_focused);
 
+    /* hacky method to force a web-view update after removing focus */
+    WebKitWebView *web_view = (WebKitWebView *)view;
+    double zoom =  webkit_web_view_get_zoom_level(web_view);
+    webkit_web_view_set_zoom_level(web_view, zoom+0.001);
+    webkit_web_view_set_zoom_level(web_view, zoom);
+
     /* launch the media player */
     int pid = fork();
     if (pid == 0) {
@@ -178,7 +184,7 @@ static void on_message(WebKitUserContentManager *content, WebKitJavascriptResult
 static void on_load_changed(WebKitWebView *web_view, WebKitLoadEvent event, void *userdata)
 {
     const gchar *uri = webkit_web_view_get_uri(web_view);
-    g_print("plog: on_load_changed: %s\n", uri);
+    g_debug("plog: on_load_changed: %s\n", uri);
 }
 
 static void on_activate(GApplication *self, void *user_data)
