@@ -852,7 +852,7 @@ input_handle_pointer_button_event (CogView *view, struct libinput_event_pointer 
             .pressed = state,
             .modifiers = 0,
         };
-        g_print("check-ptr: code=%04x hw=%04x state=%d\n", event.key_code, event.hardware_key_code, event.pressed);
+        //g_print("check-ptr: code=%04x hw=%04x state=%d\n", event.key_code, event.hardware_key_code, event.pressed);
 
         /* dispatch the key only if remapped (else handle below as pointer event) */
         if (input_dispatch_key_event(view, &event, true))
@@ -882,7 +882,7 @@ input_handle_pointer_button_event (CogView *view, struct libinput_event_pointer 
         .modifiers = modifiers,
     };
     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
-    g_print("pointer.event: btn=%d st=%d mod=%08x\n", event.button, event.state, event.modifiers);
+    //g_print("pointer.event: btn=%d st=%d mod=%08x\n", event.button, event.state, event.modifiers);
 
     if (!state)
         modifiers = 0;
