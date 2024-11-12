@@ -1559,9 +1559,6 @@ cog_drm_platform_init_web_view(CogPlatform *platform, WebKitWebView *view)
 {
     COG_DRM_PLATFORM(platform)->web_view = COG_VIEW(view);
 
-    WebKitWebContext *ctx = webkit_web_context_get_default();
-    webkit_web_context_set_process_model(ctx, WEBKIT_PROCESS_MODEL_MULTIPLE_SECONDARY_PROCESSES);
-
     wpe_view_backend_dispatch_set_device_scale_factor(wpe_view_data.backend, drm_data.device_scale);
     wpe_view_backend_add_activity_state(wpe_view_data.backend, wpe_view_activity_state_focused);
 
