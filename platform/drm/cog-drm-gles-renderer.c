@@ -143,7 +143,17 @@ cog_drm_gles_renderer_handle_egl_image(void *data, struct wpe_fdo_egl_exported_i
 
     if (drmModePageFlip(drm_fd, self->crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, self)) {
         g_warning("%s: Cannot schedule page flip (%s)", __func__, g_strerror(errno));
-        return;
+
+        /* page-flip depends on prior set-crtc so redo on error */
+        if (drmModeSetCrtc(drm_fd, self->crtc_id, fb_id, 0, 0, &self->connector_id, 1, &self->mode)) {
+            g_warning("%s: Cannot set mode after page flip error (%s)", __func__, g_strerror(errno));
+            return;
+        }
+
+        if (drmModePageFlip(drm_fd, self->crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, self)) {
+            g_warning("%s: Cannot schedule page flip after error (%s)", __func__, g_strerror(errno));
+            return;
+        }
     }
 }
 
