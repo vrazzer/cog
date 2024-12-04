@@ -60,9 +60,10 @@ typedef struct {
     bool            atomic_modesetting;
 
     struct {
-        drmModeObjectProperties *props;
-        drmModePropertyRes     **props_info;
-    } connector_props, crtc_props, plane_props;
+      int type_id, fb_id, crtc_id;
+      int crtc_x, crtc_y, crtc_w, crtc_h;
+      int src_x, src_y, src_w, src_h;
+    } prop_id;
 } CogDrmGlesRenderer;
 
 static void
@@ -141,18 +142,45 @@ cog_drm_gles_renderer_handle_egl_image(void *data, struct wpe_fdo_egl_exported_i
 
     self->next_bo = bo;
 
-    if (drmModePageFlip(drm_fd, self->crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, self)) {
-        g_warning("%s: Cannot schedule page flip (%s)", __func__, g_strerror(errno));
+    if (self->atomic_modesetting) {
+        int32_t ret = 0;
+        uint32_t flags = DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK;
 
-        /* page-flip depends on prior set-crtc so redo on error */
-        if (drmModeSetCrtc(drm_fd, self->crtc_id, fb_id, 0, 0, &self->connector_id, 1, &self->mode)) {
-            g_warning("%s: Cannot set mode after page flip error (%s)", __func__, g_strerror(errno));
-            return;
+        drmModeAtomicReq *req = drmModeAtomicAlloc();
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.fb_id, fb_id) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.crtc_id, self->crtc_id) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.src_x, 0) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.src_y, 0) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.src_w, ((uint64_t) self->mode.hdisplay) << 16) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.src_h, ((uint64_t) self->mode.vdisplay) << 16) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.crtc_x, 0) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.crtc_y, 0) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.crtc_w, self->mode.hdisplay) < 0;
+        ret |= drmModeAtomicAddProperty(req, self->plane_id, self->prop_id.crtc_h, self->mode.vdisplay) < 0;
+        if (ret == 0)
+            ret = drmModeAtomicCommit(drm_fd, req, flags, self);
+        drmModeAtomicFree(req);
+
+        if (ret) {
+            g_warning("atomic commit error(%d): trying non-atomic", ret);
+            self->atomic_modesetting = false;
         }
+    }
 
+    if (!self->atomic_modesetting) {
         if (drmModePageFlip(drm_fd, self->crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, self)) {
-            g_warning("%s: Cannot schedule page flip after error (%s)", __func__, g_strerror(errno));
-            return;
+            g_warning("%s: Cannot schedule page flip (%s)", __func__, g_strerror(errno));
+
+            /* page-flip depends on prior set-crtc so redo on error */
+            if (drmModeSetCrtc(drm_fd, self->crtc_id, fb_id, 0, 0, &self->connector_id, 1, &self->mode)) {
+                g_warning("%s: Cannot set mode after page flip error (%s)", __func__, g_strerror(errno));
+                return;
+            }
+
+            if (drmModePageFlip(drm_fd, self->crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, self)) {
+                g_warning("%s: Cannot schedule page flip after error (%s)", __func__, g_strerror(errno));
+                return;
+            }
         }
     }
 }
@@ -441,26 +469,24 @@ cog_drm_gles_renderer_new(struct gbm_device     *gbm_device,
 
     int drm_fd = gbm_device_get_fd(gbm_device);
 
-    self->connector_props.props = drmModeObjectGetProperties(drm_fd, self->connector_id, DRM_MODE_OBJECT_CONNECTOR);
-    if (self->connector_props.props) {
-        self->connector_props.props_info = g_new0(drmModePropertyRes *, self->connector_props.props->count_props);
-        for (uint32_t i = 0; i < self->connector_props.props->count_props; i++)
-            self->connector_props.props_info[i] = drmModeGetProperty(drm_fd, self->connector_props.props->props[i]);
+    /* one-time lookup of property identifiers-- avoid per-render lookup */
+    drmModeObjectProperties *plane_props = drmModeObjectGetProperties(drm_fd, self->plane_id, DRM_MODE_OBJECT_PLANE);
+    for (int i = 0; i < plane_props->count_props; ++i) {
+        drmModePropertyPtr prop = drmModeGetProperty(drm_fd, plane_props->props[i]);
+        if (g_ascii_strcasecmp(prop->name, "type") == 0)    self->prop_id.type_id = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "fb_id") == 0)   self->prop_id.fb_id = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "crtc_id") == 0) self->prop_id.crtc_id = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "crtc_x") == 0)  self->prop_id.crtc_x = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "crtc_y") == 0)  self->prop_id.crtc_y = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "crtc_w") == 0)  self->prop_id.crtc_w = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "crtc_h") == 0)  self->prop_id.crtc_h = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "src_x") == 0)   self->prop_id.src_x = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "src_y") == 0)   self->prop_id.src_y = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "src_w") == 0)   self->prop_id.src_w = prop->prop_id;
+        if (g_ascii_strcasecmp(prop->name, "src_h") == 0)   self->prop_id.src_h = prop->prop_id;
+        drmModeFreeProperty(prop);
     }
-
-    self->crtc_props.props = drmModeObjectGetProperties(drm_fd, self->crtc_id, DRM_MODE_OBJECT_CRTC);
-    if (self->crtc_props.props) {
-        self->crtc_props.props_info = g_new0(drmModePropertyRes *, self->crtc_props.props->count_props);
-        for (uint32_t i = 0; i < self->crtc_props.props->count_props; i++)
-            self->crtc_props.props_info[i] = drmModeGetProperty(drm_fd, self->crtc_props.props->props[i]);
-    }
-
-    self->plane_props.props = drmModeObjectGetProperties(drm_fd, self->plane_id, DRM_MODE_OBJECT_PLANE);
-    if (self->plane_props.props) {
-        self->plane_props.props_info = g_new0(drmModePropertyRes *, self->plane_props.props->count_props);
-        for (uint32_t i = 0; i < self->plane_props.props->count_props; i++)
-            self->plane_props.props_info[i] = drmModeGetProperty(drm_fd, self->plane_props.props->props[i]);
-    }
+    drmModeFreeObjectProperties(plane_props);
 
     g_debug("%s: Using plane #%" PRIu32 ", crtc #%" PRIu32 ", connector #%" PRIu32 " (%s).", __func__, plane_id,
             crtc_id, connector_id, atomic_modesetting ? "atomic" : "legacy");
