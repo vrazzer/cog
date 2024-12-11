@@ -574,6 +574,18 @@ init_drm(void)
     drm_data.height = drm_data.mode->vdisplay;
     drm_data.refresh = drm_data.mode->vrefresh;
 
+    /* initial hack to specify virtual screen size */
+    int vx = 0, vy = 0;
+    const char *virtual = g_getenv("COG_PLATFORM_DRM_VIRTUAL");
+    if (virtual && (sscanf(virtual, "%dx%d", &vx, &vy) == 2) && (vx > 0) && (vy > 0)) {
+      double smin = MIN(drm_data.width/(double)vx, drm_data.height/(double)vy);
+      double smax = MAX(drm_data.width/(double)vx, drm_data.height/(double)vy);
+      drm_data.device_scale = (smax < 1.0) ? smax : smin;
+      drm_data.width /= drm_data.device_scale;
+      drm_data.height /= drm_data.device_scale;
+      g_print("cog: wid=%d hgt=%d scale=%f\n", drm_data.width, drm_data.height, drm_data.device_scale);
+    }
+
     g_clear_pointer(&drm_data.base_resources, drmModeFreeResources);
     g_clear_pointer(&drm_data.plane_resources, drmModeFreePlaneResources);
 
