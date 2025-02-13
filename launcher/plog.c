@@ -15,6 +15,13 @@
 
 #include "cog-launcher.h"
 #include <sys/wait.h>
+#include <libsoup/soup.h>
+
+// global domain hash tables to workaround broken webkit_website_data_manager_fetch()
+static GHashTable *hash_domain = NULL;
+static GHashTable *hash_cookie = NULL;
+static char cookie_imp[4096] = "";
+static char cookie_exp[4096] = "";
 
 struct plog_source {
     GSource s;
@@ -49,7 +56,7 @@ player_dispatch(GSource *state, GSourceFunc callback, gpointer user_data)
 {
     struct plog_source *source = (void *)state;
     WebKitWebView *web_view = (WebKitWebView *)source->view;
-    g_print("player_dispatch\n");
+    g_info("player_dispatch: %08x\n", source->pfd.revents);
 
     if (!(source->pfd.revents & (G_IO_ERR|G_IO_HUP))) {
         /* process child status updates */
@@ -86,7 +93,7 @@ player_dispatch(GSource *state, GSourceFunc callback, gpointer user_data)
     
     /* tell gsource to terminate */
     close(source->pipe1);
-    g_print("plog_terminate\n");
+    g_info("player_dispatch: terminate\n");
     return(FALSE);
 }
 
@@ -119,7 +126,7 @@ on_message(WebKitUserContentManager *content, WebKitJavascriptResult *result, vo
             char key[16];
             g_snprintf(key, sizeof(key), "PARM_%s", kv);
             g_setenv(key, kv+i, true);
-            g_print("player: %s=%s\n", key, kv+i);
+            g_info("player: %s=%s\n", key, kv+i);
         }
     }
 
@@ -145,7 +152,7 @@ on_message(WebKitUserContentManager *content, WebKitJavascriptResult *result, vo
         if (s == NULL)
             s = "";
         argp[argi] = s;
-        g_print("argv(%d)=%s\n", argi, s);
+        g_info("argv(%d)=%s\n", argi, s);
     }
     argp[argi] = NULL;
 
@@ -187,39 +194,93 @@ on_message(WebKitUserContentManager *content, WebKitJavascriptResult *result, vo
 }
 
 static void
-on_cookie_get(WebKitCookieManager *manager, GAsyncResult *result, void *userdata)
+on_view_load(WebKitWebView *view, WebKitLoadEvent event, void *userdata)
 {
-  WebKitWebView *view = userdata;
+  // check for cookie import at start of each page load
+  if ((event == WEBKIT_LOAD_STARTED) && (cookie_imp[0] != 0)) {
+    gchar *data = NULL;
+    g_file_get_contents(cookie_imp, &data, NULL, NULL);
+    if (data != NULL) {
+      WebKitWebContext *ctx = webkit_web_view_get_context(view);
 
-  GString *jar = g_string_new(NULL);
-  GList *list = webkit_cookie_manager_get_cookies_finish(manager, result, NULL);
-  for (GList *p = list; p != NULL; p = p->next) {
-    SoupCookie *c = p->data;
-    gchar *hdr = soup_cookie_to_set_cookie_header(c);
-    g_string_append_printf(jar, "%s\n", hdr);
-    g_free(hdr);
+      // clear all existing cookies
+      WebKitWebsiteDataManager *dm = webkit_web_context_get_website_data_manager(ctx);
+      webkit_website_data_manager_clear(dm, WEBKIT_WEBSITE_DATA_COOKIES, 0, NULL, NULL, NULL);
+
+      // add new cookies
+      WebKitCookieManager *cm = webkit_web_context_get_cookie_manager(ctx);
+      gchar **line = g_strsplit(data, "\n", 0);
+      for (int i = 0; line[i] != NULL; ++i) {
+        SoupCookie *soup = soup_cookie_parse(line[i], NULL);
+        webkit_cookie_manager_add_cookie(cm, soup, NULL, NULL, NULL);
+      }
+      g_strfreev(line);
+      unlink(cookie_imp);
+    }
   }
-  g_list_free(list);
-
-  WebKitUserMessage *msg = webkit_user_message_new("cookout", g_variant_new("s", jar->str));
-  g_string_free(jar, TRUE);
-  webkit_web_view_send_message_to_page(view, msg, NULL, NULL, NULL);
 }
 
-static gboolean
-on_view_msg(WebKitWebView *view, WebKitUserMessage *msg, void *userdata)
+static void
+on_cookie_get(WebKitCookieManager *cm, GAsyncResult *result, void *show)
 {
-  const gchar *uri = webkit_web_view_get_uri(view);
-  const gchar *name = webkit_user_message_get_name(msg);
-
-  g_print("on_view_msg: %s %s\n", name, uri);
-
-  if (strcmp(name, "cookout") == 0) {
-    WebKitWebContext *ctx = webkit_web_view_get_context(view);
-    WebKitCookieManager *cm = webkit_web_context_get_cookie_manager(ctx);
-    webkit_cookie_manager_get_cookies(cm, uri, NULL, (GAsyncReadyCallback)on_cookie_get, view);
+  GList *list = webkit_cookie_manager_get_cookies_finish(cm, result, NULL);
+  if (list != NULL) {
+    for (GList *p = list; p != NULL; p = p->next) {
+      SoupCookie *c = p->data;
+      gchar *hdr = soup_cookie_to_set_cookie_header(c);
+      g_debug("cookie: %s\n", hdr);
+      g_hash_table_replace(hash_cookie, hdr, "1");
+    }
+    g_list_free(list);
   }
-  return(FALSE);
+
+  if (show) {
+    GString *str = g_string_new(NULL);
+    list = g_hash_table_get_keys(hash_cookie);
+    for (GList *p = list; p != NULL; p = p->next) {
+      gchar *key = p->data;
+      g_string_append(str, key);
+      g_string_append_c(str, '\n');
+      g_debug("show: %s\n", key);
+    }
+    g_list_free(list);
+
+    g_file_set_contents(cookie_exp, str->str, str->len, NULL);
+    g_debug("cookie-out: %ld %s\n", str->len, cookie_exp);
+    g_string_free(str, TRUE);
+  } 
+}
+
+static void
+on_changed(WebKitCookieManager *cm, void *user)
+{
+  if (cookie_exp[0] == 0)
+    return;
+
+  g_debug("on_changed\n");
+  g_hash_table_remove_all(hash_cookie);
+
+  GList *list = g_hash_table_get_keys(hash_domain);
+  for (GList *p = list; p != NULL; p = p->next) {
+    char query[1024];
+    g_snprintf(query, sizeof(query), "https://%s", (const char *)p->data);
+    g_debug("query: %s\n", query);
+    webkit_cookie_manager_get_cookies(cm, query, NULL, (GAsyncReadyCallback)on_cookie_get, p->next ? NULL : cm);
+  }
+  g_list_free(list);
+}
+
+static void
+on_rsrc_load(WebKitWebView *view, WebKitWebResource *rsrc, WebKitURIRequest *req, void *user)
+{
+  // capture list of possible domains for cookie query (since fetch is busted)
+  const gchar *uri = webkit_web_resource_get_uri(rsrc);
+  g_debug("on_rsrc_load: %s\n", uri);
+  GUri *guri = g_uri_parse(uri, 0, NULL);
+  const char *host = g_uri_get_host(guri);
+  if (host != NULL)
+  g_hash_table_replace(hash_domain, g_strdup(host), "1");
+  g_uri_unref(guri);
 }
 
 static void
@@ -233,7 +294,13 @@ on_activate(GApplication *self, void *user_data)
     g_signal_connect(content, "script-message-received::plog", G_CALLBACK(on_message), view);
     webkit_user_content_manager_register_script_message_handler(content, "plog");
 
-    g_signal_connect(view, "user-message-received", G_CALLBACK(on_view_msg), NULL);
+    g_signal_connect(view, "resource-load-started", G_CALLBACK(on_rsrc_load), NULL);
+    g_signal_connect(view, "load-changed", G_CALLBACK(on_view_load), NULL);
+
+    WebKitWebContext *ctx = webkit_web_view_get_context(view);
+    WebKitCookieManager *cm = webkit_web_context_get_cookie_manager(ctx);
+    g_signal_connect(cm, "changed", G_CALLBACK(on_changed), NULL);
+    on_changed(cm, NULL);
 }
 
 int main(int argc, char *argv[])
@@ -244,6 +311,36 @@ int main(int argc, char *argv[])
     CogLauncher *launcher = cog_launcher_new(COG_SESSION_REGULAR);
     g_autoptr(GApplication) app = G_APPLICATION(launcher);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
+    hash_domain = g_hash_table_new(g_str_hash, g_str_equal);
+    hash_cookie = g_hash_table_new(g_str_hash, g_str_equal);
+
+    // find/parse cookie-jar to work around broken apis:
+    // webkit_website_data_manager_fetch(WEBKIT_WEBSITE_DATA_COOKIES): does not return .domains
+    // webkit_cookie_manager_get_cookies(): uses url instead of domain prefix & no "select-all"
+    for (int argi = 1; argi < argc; ++argi) {
+      if (memcmp(argv[argi], "--cookie-jar=text:", 18) == 0) {
+        g_snprintf(cookie_imp, sizeof(cookie_imp), "%s.imp", argv[argi]+18);
+        g_snprintf(cookie_exp, sizeof(cookie_exp), "%s.exp", argv[argi]+18);
+        g_debug("path: %s\n", argv[argi]+18);
+        gchar *data = NULL;
+        g_file_get_contents(argv[argi]+18, &data, NULL, NULL);
+        if ((data != NULL) && (*data != 0)) {
+          gchar **line = g_strsplit(data, "\n", 0);
+          for (int i = 0; line[i] != NULL; ++i) {
+            const char *beg = line[i];
+            if (memcmp(beg, "#HttpOnly_", 10) == 0)
+              beg += 10;
+            if (beg[0] == '.')
+              beg += 1;
+            const char *end = g_strstr_len(beg, -1, "\t");
+            if (end != NULL)
+              g_hash_table_replace(hash_domain, g_strndup(beg, end-beg), "1");
+          }
+          g_strfreev(line);
+        }
+      }
+    }
+
     return(g_application_run(app, argc, argv));
 }
 
