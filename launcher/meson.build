@@ -19,3 +19,8 @@ executable('cogctl',
     dependencies: [libsoup_dep, cogcore_dep.partial_dependency(includes: true)],
     install: true,
 )
+shared_library('snapshot',
+  'snapshot.c',
+  dependencies: [cogcore_dep],
+  install: false,
+  )
