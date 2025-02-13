@@ -436,7 +436,7 @@ cog_uri_get_env(const gchar *uri, const gchar *filt)
         ref = g_getenv(ref+1);
 
     gchar *ret = g_strdup(ref);
-    g_print("cog_uri_get_env(%s): filt=%s ret=%s\n", uri, filt, ret);
+    g_debug("cog_uri_get_env(%s): filt=%s ret=%s\n", uri, filt, ret);
     g_strfreev(cmp);
     return(ret);
 }
