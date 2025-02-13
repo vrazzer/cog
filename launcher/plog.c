@@ -82,6 +82,7 @@ player_dispatch(GSource *state, GSourceFunc callback, gpointer user_data)
     /* restore focus so input processing resumes */
     struct wpe_view_backend *backend = cog_view_get_backend(source->view);
     wpe_view_backend_add_activity_state(backend, wpe_view_activity_state_focused);
+    wpe_view_backend_add_activity_state(backend, wpe_view_activity_state_visible);
     
     /* tell gsource to terminate */
     close(source->pipe1);
@@ -151,6 +152,7 @@ on_message(WebKitUserContentManager *content, WebKitJavascriptResult *result, vo
     /* remove focus from view so input is not processed */
     struct wpe_view_backend *backend = cog_view_get_backend(view);
     wpe_view_backend_remove_activity_state(backend, wpe_view_activity_state_focused);
+    wpe_view_backend_remove_activity_state(backend, wpe_view_activity_state_visible);
 
     /* hacky method to force a web-view update after removing focus */
     WebKitWebView *web_view = (WebKitWebView *)view;
